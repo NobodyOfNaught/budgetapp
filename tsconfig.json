@@ -1,0 +1,14 @@
+{
+  // Orchestrator only. The Worker (src/, test/), the SPA (web/src/), and the
+  // Node-context tooling config (vitest/drizzle/vite configs) have
+  // deliberately separate configs below — Workers and DOM types both
+  // declare fetch/Request/Response, so mixing them in one program produces
+  // spurious conflicts. Run `npm run typecheck` (`tsc -b`), not `tsc`
+  // directly, to check all three.
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.worker.json" },
+    { "path": "./tsconfig.web.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}

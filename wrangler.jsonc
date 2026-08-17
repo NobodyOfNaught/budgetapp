@@ -1,0 +1,75 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "budgetapp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "ae27b7c9ac758e8d19425d6bbfaa127f",
+
+  // Single Worker serves both the API (/api/*, routed to Hono) and the SPA
+  // (everything else, falling through to the built web/dist assets). One
+  // deploy, one origin, no CORS.
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  "vars": {
+    "ENVIRONMENT": "production"
+  },
+
+  // Production. Bound as `DB`. Migrations applied on every `main` deploy —
+  // see the "main deploy" command in the plan / README.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "budgetapp-db",
+      "database_id": "8929286f-b8c1-44c3-9579-0636ba5684ad",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "env": {
+    // stg shares the PRODUCTION database on purpose (see plan: "Environments
+    // & deployment" — stg proves app-only changes against real data). Its
+    // deploy command therefore runs scripts/assert-schema-current.mjs
+    // instead of applying migrations, and never runs migrations here.
+    "stg": {
+      "name": "budgetapp-stg",
+      "vars": { "ENVIRONMENT": "staging" },
+      "assets": {
+        "directory": "./web/dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "budgetapp-db",
+          "database_id": "8929286f-b8c1-44c3-9579-0636ba5684ad"
+        }
+      ]
+    },
+
+    // uat gets its OWN database, so schema changes get a real rehearsal
+    // before they ever touch prod data (via stg) or prod itself (via main).
+    "uat": {
+      "name": "budgetapp-uat",
+      "vars": { "ENVIRONMENT": "uat" },
+      "assets": {
+        "directory": "./web/dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "budgetapp-uat-db",
+          "database_id": "cb0e0695-661a-4a29-ac48-97bbaf12dbad",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
+}

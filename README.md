@@ -118,20 +118,23 @@ pipeline and the PR check. For **each** of the three Workers
    you meant; `--env=""` says explicitly "the top-level, i.e. production,
    config".)
 
-5. **Only on `budgetapp-uat`**: Settings → Builds → Branch control → enable
-   **"Builds for non-production branches"**, and set its **non-production
-   deploy command** to:
+5. **Only on `budgetapp-uat`**: in the top-level command fields (not nested
+   under anything) there's a **"Version command"** field alongside Build
+   command and Deploy command — that's the one that runs for
+   non-production branches, the counterpart to Deploy command running only
+   for the production branch. Set it to:
 
    ```
    npx wrangler versions upload --env uat
    ```
 
-   This is what turns every feature-branch push into a PR preview against
-   the UAT database, without shifting production traffic — see the plan's
-   "PR checks without Actions" section. Leave non-production branch builds
-   **disabled** on `budgetapp` and `budgetapp-stg` — that's what stops an
-   arbitrary feature branch from ever running against the production
-   database.
+   Then, in **Branch control**, enable **"Builds for non-production
+   branches"**. This combination is what turns every feature-branch push
+   into a PR preview against the UAT database, without shifting production
+   traffic — see the plan's "PR checks without Actions" section. Leave
+   non-production branch builds **disabled** on `budgetapp` and
+   `budgetapp-stg` — that's what stops an arbitrary feature branch from
+   ever running against the production database.
 
 6. Push a commit to each production branch (or use "Retry build" in the
    dashboard) to confirm the first build goes green.

@@ -38,9 +38,20 @@ type BudgetRole = keyof typeof ROLE_RANK;
  * invite flow just inserts more rows here, no route changes.
  *
  * Must run after `requireAuth` (reads `c.get('user')`).
+ *
+ * Cheap to stack: a resource's whole sub-app can apply the loosest role
+ * that covers any of its routes (e.g. 'viewer' for everything), and
+ * individual mutating routes add a stricter check on top — a repeated call
+ * reads the role this one already fetched instead of re-querying D1.
  */
 export function requireBudgetMember(minRole: BudgetRole = 'viewer'): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
+    const existingRole = c.get('budgetRole');
+    if (existingRole !== undefined) {
+      if (ROLE_RANK[existingRole] < ROLE_RANK[minRole]) return c.json({ error: 'forbidden' }, 403);
+      return next();
+    }
+
     const user = c.get('user');
     const budgetId = c.req.param('budgetId');
     if (!budgetId) return c.json({ error: 'bad_request' }, 400);

@@ -178,6 +178,8 @@ export const categoryGroups = sqliteTable(
     sortOrder: integer('sort_order').notNull().default(0),
     isSystem: integer('is_system', { mode: 'boolean' }).notNull().default(false),
     hiddenAt: integer('hidden_at'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
     deletedAt: integer('deleted_at'),
   },
   (t) => [index('category_groups_budget_idx').on(t.budgetId)],

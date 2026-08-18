@@ -4,6 +4,10 @@ import { requireAuth, requireBudgetMember } from '../auth/middleware';
 import { getDb } from '../db/client';
 import { budgetMembers, budgets } from '../db/schema';
 import type { AppEnv } from '../types/hono';
+import { accountsRoute } from './accounts';
+import { categoriesRoute } from './categories';
+import { payeesRoute } from './payees';
+import { accountRegisterRoute, transactionsRoute } from './transactions';
 
 export const budgetsRoute = new Hono<AppEnv>();
 
@@ -38,3 +42,9 @@ budgetsRoute.get('/:budgetId', requireBudgetMember('viewer'), async (c) => {
 
   return c.json({ budget, role: c.get('budgetRole') });
 });
+
+budgetsRoute.route('/:budgetId/accounts', accountsRoute);
+budgetsRoute.route('/:budgetId/categories', categoriesRoute);
+budgetsRoute.route('/:budgetId/payees', payeesRoute);
+budgetsRoute.route('/:budgetId/transactions', transactionsRoute);
+budgetsRoute.route('/:budgetId/accounts/:accountId/transactions', accountRegisterRoute);

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 import type { MeResponse } from '../types';
+import { Budget } from './Budget';
 import { SignInForm } from './SignInForm';
 
 type State = { kind: 'loading' } | { kind: 'signed_out' } | { kind: 'signed_in'; me: MeResponse };
@@ -47,14 +48,16 @@ export function Home() {
         <button onClick={signOut}>Sign out</button>
       </p>
       {primaryBudget ? (
-        <p>
-          Budget: <strong>{primaryBudget.name}</strong> ({primaryBudget.currencyCode}) — role:{' '}
-          {primaryBudget.role}
-        </p>
+        <>
+          <p>
+            Budget: <strong>{primaryBudget.name}</strong> ({primaryBudget.currencyCode}) — role:{' '}
+            {primaryBudget.role}
+          </p>
+          <Budget budgetId={primaryBudget.id} />
+        </>
       ) : (
         <p>No budget yet.</p>
       )}
-      <p style={{ color: '#666' }}>Accounts, categories, and transactions land in a later PR.</p>
     </>
   );
 }

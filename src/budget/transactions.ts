@@ -1,0 +1,226 @@
+import { eq } from 'drizzle-orm';
+import type { Db } from '../db/client';
+import { transactions } from '../db/schema';
+import { ulid } from '../lib/ids';
+
+export type ClearedStatus = 'uncleared' | 'cleared' | 'reconciled';
+
+export interface NewTransactionInput {
+  /** Pre-generated id — needed when two rows must reference each other's id before either is inserted (a transfer pair). Defaults to a fresh ulid. */
+  id?: string;
+  budgetId: string;
+  accountId: string;
+  date: string;
+  amountMinor: number;
+  currencyCode: string;
+  categoryId?: string | null;
+  payeeId?: string | null;
+  memo?: string | null;
+  cleared?: ClearedStatus;
+  transferTransactionId?: string | null;
+  transferAccountId?: string | null;
+  parentTransactionId?: string | null;
+}
+
+/**
+ * Inserts a single ordinary transaction row. budgetAmountMinor equals
+ * amountMinor for now — the MVP assumes one display currency, so there's no
+ * real conversion yet. This is the one line that changes when multi-
+ * currency ships; everything downstream (the ledger engine, every report)
+ * already sums budgetAmountMinor, not amountMinor — see docs/plan.md.
+ */
+export async function insertTransaction(db: Db, input: NewTransactionInput, now: number): Promise<string> {
+  const id = input.id ?? ulid(now);
+  await db.insert(transactions).values({
+    id,
+    budgetId: input.budgetId,
+    accountId: input.accountId,
+    date: input.date,
+    amountMinor: input.amountMinor,
+    currencyCode: input.currencyCode,
+    budgetAmountMinor: input.amountMinor,
+    categoryId: input.categoryId ?? null,
+    payeeId: input.payeeId ?? null,
+    memo: input.memo ?? null,
+    cleared: input.cleared ?? 'uncleared',
+    transferTransactionId: input.transferTransactionId ?? null,
+    transferAccountId: input.transferAccountId ?? null,
+    parentTransactionId: input.parentTransactionId ?? null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+export interface SplitPart {
+  categoryId: string | null;
+  amountMinor: number;
+  memo?: string | null;
+}
+
+/**
+ * Inserts a split parent (categoryId null, amount = sum of parts — the
+ * single line the register/account-balance math sees) plus one child row
+ * per part (each carrying its own category and portion of the amount).
+ * See docs/plan.md's ledger engine section: the parent is excluded from
+ * all category/Ready-to-Assign math, its children carry it.
+ */
+export async function insertSplitTransaction(
+  db: Db,
+  input: {
+    budgetId: string;
+    accountId: string;
+    date: string;
+    currencyCode: string;
+    payeeId: string | null;
+    memo: string | null;
+    cleared: ClearedStatus;
+    parts: SplitPart[];
+  },
+  now: number,
+): Promise<string> {
+  const totalMinor = input.parts.reduce((sum, p) => sum + p.amountMinor, 0);
+  const parentId = await insertTransaction(
+    db,
+    {
+      budgetId: input.budgetId,
+      accountId: input.accountId,
+      date: input.date,
+      amountMinor: totalMinor,
+      currencyCode: input.currencyCode,
+      payeeId: input.payeeId,
+      memo: input.memo,
+      cleared: input.cleared,
+    },
+    now,
+  );
+
+  for (const part of input.parts) {
+    await insertTransaction(
+      db,
+      {
+        budgetId: input.budgetId,
+        accountId: input.accountId,
+        date: input.date,
+        amountMinor: part.amountMinor,
+        currencyCode: input.currencyCode,
+        categoryId: part.categoryId,
+        payeeId: input.payeeId,
+        memo: part.memo ?? null,
+        cleared: input.cleared,
+        parentTransactionId: parentId,
+      },
+      now,
+    );
+  }
+
+  return parentId;
+}
+
+interface TransferLeg {
+  accountId: string;
+  currencyCode: string;
+  amountMinor: number;
+  categoryId?: string | null;
+}
+
+/**
+ * Inserts both legs of a transfer, cross-referencing each other's id via
+ * transferTransactionId — "find the other leg" is then a plain primary-key
+ * lookup. Left uncategorized by default on both sides (the common case:
+ * money moving between the user's own on-budget accounts, no budget
+ * effect); pass `from.categoryId` to categorize the outflow leg, which is
+ * how paying a credit card works — see docs/plan.md's ledger engine notes.
+ */
+export async function insertTransferPair(
+  db: Db,
+  input: {
+    budgetId: string;
+    from: TransferLeg;
+    fromPayeeId: string;
+    to: TransferLeg;
+    toPayeeId: string;
+    date: string;
+    memo: string | null;
+    cleared: ClearedStatus;
+  },
+  now: number,
+): Promise<{ fromId: string; toId: string }> {
+  // Both ids are generated up front, before either row is inserted, so
+  // each leg can reference the other's id as its transferTransactionId.
+  const fromId = ulid(now);
+  const toId = ulid(now);
+
+  await insertTransaction(
+    db,
+    {
+      id: fromId,
+      budgetId: input.budgetId,
+      accountId: input.from.accountId,
+      date: input.date,
+      amountMinor: input.from.amountMinor,
+      currencyCode: input.from.currencyCode,
+      categoryId: input.from.categoryId ?? null,
+      payeeId: input.fromPayeeId,
+      memo: input.memo,
+      cleared: input.cleared,
+      transferTransactionId: toId,
+      transferAccountId: input.to.accountId,
+    },
+    now,
+  );
+  await insertTransaction(
+    db,
+    {
+      id: toId,
+      budgetId: input.budgetId,
+      accountId: input.to.accountId,
+      date: input.date,
+      amountMinor: input.to.amountMinor,
+      currencyCode: input.to.currencyCode,
+      categoryId: input.to.categoryId ?? null,
+      payeeId: input.toPayeeId,
+      memo: input.memo,
+      cleared: input.cleared,
+      transferTransactionId: fromId,
+      transferAccountId: input.from.accountId,
+    },
+    now,
+  );
+
+  return { fromId, toId };
+}
+
+/**
+ * Soft-deletes a transaction and cascades to whatever it's structurally
+ * tied to: a split parent's children, or a transfer's sibling leg. Deleting
+ * a split child directly (bypassing its parent) is left unguarded — the UI
+ * never does this, only whole-transaction delete on the parent.
+ */
+export async function softDeleteTransactionCascade(db: Db, transactionId: string, now: number): Promise<boolean> {
+  const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId)).limit(1);
+  if (!row || row.deletedAt !== null) return false;
+
+  const children = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.parentTransactionId, transactionId));
+  for (const child of children) {
+    await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, child.id));
+  }
+
+  await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, transactionId));
+
+  if (row.transferTransactionId) {
+    const [sibling] = await db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, row.transferTransactionId))
+      .limit(1);
+    if (sibling && sibling.deletedAt === null) {
+      await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, sibling.id));
+    }
+  }
+
+  return true;
+}

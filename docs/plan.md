@@ -286,6 +286,43 @@ number.
 Explicitly **not** in the MVP: targets/goals, reports, sharing, statement import,
 scheduled transactions, net worth, full reconciliation flow, a mobile app.
 
+**Items 3, 4, 5 (partial), and 7 implemented in PR 4** — accounts, categories, payees, and
+transactions (create/edit/delete, splits, transfers) end to end, API and register UI. Item
+6 (the budget screen — assign, move money, Ready to Assign) is PR 5; it's what finally
+wires the PR 3 ledger engine into an endpoint. A few things worth recording:
+
+- **A real bug the test suite caught before it shipped**: the transfer-creation handler
+  had the source/destination sign backwards (`from.amountMinor = minor` instead of
+  `-minor`) — money appeared to flow the wrong direction. Caught by
+  `test/transactions.test.ts`'s transfer test, which is exactly why splits/transfers/the
+  credit-card mechanic all got real assertions rather than "the endpoint returns 201".
+  Fixed contract, stated plainly: a transfer's `amount` is the positive magnitude moving
+  from the source account to the destination — sign is implied by which field is which,
+  never by the sign the caller types.
+- **The credit-card end-to-end test feeds real API-created data into `computeLedger`
+  directly** (`test/transactions.test.ts`) — not a mock, the exact PR 3 engine — to prove
+  the API and the engine actually agree on the purchase/payment sign conventions
+  documented above. This is the test that would have caught it if the API had encoded the
+  doubling rule differently than the engine expects.
+- **`category_groups` was missing `created_at`/`updated_at`** (the one table in
+  `0000_init.sql` inconsistent with every other table) — caught while building its CRUD
+  routes, fixed in `migrations/0001_category_group_timestamps.sql`, applied to prod and
+  uat (never `stg` — see "Guarding the shared production database"). The table was
+  verifiably empty in every environment before the migration ran.
+- **`zod` added as a direct dependency** — request bodies got materially more complex here
+  (nested splits, discriminated ordinary/split/transfer shapes) than auth's two-field
+  bodies, where hand-rolled `typeof` checks were still proportionate.
+- **A local-dev gap surfaced by an actual browser smoke test** (Playwright against
+  `wrangler dev`, not just the API test suite): local D1 migrations are not applied
+  automatically — skipping `npm run db:migrate:local` produces "no such table" 500s on
+  every request. Documented in the README; would have been a rough first-run experience
+  otherwise.
+- **Un-splitting a transaction back to a single category isn't exposed** — `PATCH
+  .../transactions/:id`'s `splits` replacement requires at least 2 parts (same as create:
+  a 1-line "split" isn't a split), consistent with the broader rule that shape can't
+  change via edit. Delete and recreate covers it; a dedicated "remove last split" affordance
+  is a UI nicety, not a gap in the API.
+
 ---
 
 ## Roadmap

@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import { seedDefaultCategories } from '../budget/seed';
 import type { Db } from '../db/client';
 import { budgetMembers, budgets, users } from '../db/schema';
 import { ulid } from '../lib/ids';
@@ -70,5 +71,6 @@ async function ensureDefaultBudget(db: Db, userId: string, now: number): Promise
     revision: 0,
   });
   await db.insert(budgetMembers).values({ budgetId, userId, role: 'owner', createdAt: now });
+  await seedDefaultCategories(db, budgetId, now);
   return budgetId;
 }

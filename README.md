@@ -38,7 +38,11 @@ isn't scriptable.
 
 ```sh
 npm install
-npm run dev          # wrangler dev — serves the Worker + built web/dist on :8787
+npm run db:migrate:local   # one-time (and again after adding a migration) —
+                            # wrangler dev does NOT apply migrations to the
+                            # local D1 automatically; skipping this gets you
+                            # "no such table" 500s on every API call
+npm run dev                # wrangler dev — serves the Worker + built web/dist on :8787
 ```
 
 For frontend work with React HMR, run the Vite dev server against a running

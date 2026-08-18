@@ -429,6 +429,45 @@ second, deliberately separate pure module from the ledger engine, not a change t
   *same* locator can silently resolve to a *different* row. Fixed by locating rows by
   stable identity (category name) instead of by mutable UI state.
 
+**Item 8 implemented in PR 6 (Polish)** — responsive layout, empty states, and keyboard
+entry in the register, closing out the original MVP PR sequence. Frontend-only, no
+schema change. A few things worth recording:
+
+- **The house style is "zero CSS classes, all inline styles," and this PR breaks that on
+  purpose in exactly one place.** A `@media` breakpoint can't be expressed inside a React
+  inline `style` object, so a small, dedicated block was added to `web/src/styles.css`
+  (`.app-shell`, `.budget-layout`, `.budget-nav`, `.table-scroll`, one
+  `@media (max-width: 640px)` query) used *only* for the handful of structural elements
+  that change shape at a breakpoint — colors, spacing, and every form still stay inline
+  exactly as before. Below 640px the nav stacks above content (it's an unbounded list of
+  account names, not a small fixed tab set, so stacking is both the simpler change and
+  the better fit) and both wide tables (`BudgetMonth`'s 6 columns, `Register`'s 8) scroll
+  horizontally inside their own bounded box rather than blowing out the page — verified
+  in a real 375px-viewport smoke test: the page's own `scrollWidth` stayed at exactly the
+  viewport width throughout.
+- **Loading state was previously indistinguishable from "loaded and genuinely empty" in
+  three places.** `Budget.tsx`, `BudgetMonth.tsx`, and `Register.tsx` all rendered a
+  blank/all-zero UI in flight, while `Home.tsx`/`UpcomingPanel.tsx`/`ConfirmSignIn.tsx`
+  already showed `<p>Loading…</p>` in the equivalent spot. Fixed by matching that exact
+  precedent in all three. One consequence worth noting: `Budget.tsx`'s `categoryGroups`
+  had to change its initial state from `[]` to `null` — `[]` can't be told apart from "no
+  categories yet" the way `null` can, the same reasoning `accounts`'s `| null` state
+  already used.
+- **A budget with zero accounts rendered a fully-populated-looking all-zero category
+  table with no explanation.** Fixed with one line — `Budget.tsx` already loads
+  `accounts`, so its presence is passed down as a `hasAccounts` prop and `BudgetMonth`
+  shows "Add an account to get started" above the (still-rendered, still harmless) table.
+- **Keyboard entry, scoped narrowly to the register on purpose**: `autoFocus` on the
+  Amount field when `TransactionForm` opens (Amount, not Payee — it's present in both
+  `ordinary` and `transfer` modes, Payee isn't; the first split row's amount gets it
+  instead in `split` mode), and Escape now cancels the form without saving. **Explicitly
+  not built**: a rapid multi-entry flow (form reopening automatically after each save) —
+  considered and scoped out in favor of the smaller, lower-risk change; saving still
+  closes the form exactly as it always has, for every mode.
+- No schema change means this is the first PR since targets (PR 6, the one that added
+  `category_targets`) to use the full app-only promotion path — feature → `uat` → `stg`
+  → `main` — rather than skipping `stg`.
+
 ---
 
 ## Roadmap

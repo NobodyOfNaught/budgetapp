@@ -9,3 +9,38 @@
 body {
   margin: 0;
 }
+
+/* Structural, breakpoint-dependent layout only — everything else in this
+   app is inline styles per component (colors, spacing, forms) precisely so
+   that responsive behavior lives in one place instead of scattered
+   media-query duplication across every inline style object. See docs/plan.md
+   PR 6 (Polish). */
+.app-shell {
+  padding: 2rem;
+}
+
+.budget-layout {
+  display: flex;
+  gap: 2rem;
+}
+
+.budget-nav {
+  min-width: 12rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 1rem;
+  }
+  .budget-layout {
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .budget-nav {
+    min-width: 0;
+  }
+}

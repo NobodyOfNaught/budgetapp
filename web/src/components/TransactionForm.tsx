@@ -138,7 +138,13 @@ export function TransactionForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ border: '1px solid #ccc', padding: '1rem', marginBlock: '0.5rem' }}>
+    <form
+      onSubmit={handleSubmit}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onCancel();
+      }}
+      style={{ border: '1px solid #ccc', padding: '1rem', marginBlock: '0.5rem' }}
+    >
       <div>
         <label>
           Date <input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
@@ -184,6 +190,7 @@ export function TransactionForm({
               inputMode="decimal"
               required
               disabled={isEditing && mode !== 'ordinary'}
+              autoFocus
             />
           </label>
           {mode === 'ordinary' && <span style={{ color: '#666' }}> (negative = outflow, positive = inflow)</span>}
@@ -217,6 +224,7 @@ export function TransactionForm({
               placeholder="-10.00"
               inputMode="decimal"
               style={{ width: '6rem' }}
+              autoFocus={i === 0}
             />{' '}
             <select value={row.categoryId} onChange={(e) => updateSplit(i, { categoryId: e.target.value })}>
               <option value="">(uncategorized)</option>

@@ -12,7 +12,7 @@ type View = { kind: 'budget' } | { kind: 'account'; accountId: string };
 
 export function Budget({ budgetId }: { budgetId: string }) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
-  const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[]>([]);
+  const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[] | null>(null);
   const [view, setView] = useState<View>({ kind: 'budget' });
   const [showAccountForm, setShowAccountForm] = useState(false);
   // Bumped whenever an account is created — a new account (starting balance
@@ -42,13 +42,17 @@ export function Budget({ budgetId }: { budgetId: string }) {
     reloadCategories();
   }, [budgetId]);
 
-  const selectedAccount = view.kind === 'account' ? (accounts?.find((a) => a.id === view.accountId) ?? null) : null;
-  const onBudgetAccounts = (accounts ?? []).filter((a) => a.onBudget && !a.closedAt);
-  const trackingAccounts = (accounts ?? []).filter((a) => !a.onBudget && !a.closedAt);
+  // Both start `null` specifically so this can tell "still loading" apart
+  // from "loaded and genuinely empty" — see docs/plan.md's PR 6 notes.
+  if (accounts === null || categoryGroups === null) return <p>Loading…</p>;
+
+  const selectedAccount = view.kind === 'account' ? (accounts.find((a) => a.id === view.accountId) ?? null) : null;
+  const onBudgetAccounts = accounts.filter((a) => a.onBudget && !a.closedAt);
+  const trackingAccounts = accounts.filter((a) => !a.onBudget && !a.closedAt);
 
   return (
-    <div style={{ display: 'flex', gap: '2rem' }}>
-      <nav style={{ minWidth: '12rem' }}>
+    <div className="budget-layout">
+      <nav className="budget-nav">
         <ul style={{ listStyle: 'none', padding: 0 }}>
           <li>
             <button onClick={() => setView({ kind: 'budget' })} style={{ fontWeight: view.kind === 'budget' ? 'bold' : 'normal' }}>
@@ -103,11 +107,16 @@ export function Budget({ budgetId }: { budgetId: string }) {
 
       <div style={{ flex: 1 }}>
         {view.kind === 'budget' && (
-          <BudgetMonth budgetId={budgetId} categoryGroups={categoryGroups} refreshToken={accountsVersion} />
+          <BudgetMonth
+            budgetId={budgetId}
+            categoryGroups={categoryGroups}
+            refreshToken={accountsVersion}
+            hasAccounts={accounts.length > 0}
+          />
         )}
         {view.kind === 'account' &&
           (selectedAccount ? (
-            <Register budgetId={budgetId} account={selectedAccount} accounts={accounts ?? []} categoryGroups={categoryGroups} />
+            <Register budgetId={budgetId} account={selectedAccount} accounts={accounts} categoryGroups={categoryGroups} />
           ) : (
             <p>Add an account to get started.</p>
           ))}

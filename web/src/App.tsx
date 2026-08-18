@@ -8,7 +8,7 @@ export function App() {
   const isConfirmPage = window.location.pathname === '/auth/confirm';
 
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', padding: '2rem', maxWidth: '75rem' }}>
+    <main className="app-shell" style={{ fontFamily: 'system-ui, sans-serif', maxWidth: '75rem' }}>
       {isConfirmPage ? <ConfirmSignIn /> : <Home />}
     </main>
   );

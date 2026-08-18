@@ -83,42 +83,48 @@ export function Register({
         />
       )}
 
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr>
-            <th align="left">Date</th>
-            <th align="left">Payee</th>
-            <th align="left">Category</th>
-            <th align="left">Memo</th>
-            <th align="right">Amount</th>
-            <th align="right">Balance</th>
-            <th>Cleared</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {(data?.transactions ?? []).map((t) => (
-            <tr key={t.id} style={{ borderTop: '1px solid #ddd' }}>
-              <td>{t.date}</td>
-              <td>{t.payeeName ?? ''}</td>
-              <td>{t.isSplit ? '(split)' : t.categoryId ? (categoryNameById.get(t.categoryId) ?? '') : ''}</td>
-              <td>{t.memo ?? ''}</td>
-              <td align="right">{formatMinor(t.amountMinor)}</td>
-              <td align="right">{formatMinor(t.balance)}</td>
-              <td align="center">{t.cleared !== 'uncleared' ? '✓' : ''}</td>
-              <td>
-                {!t.isSplit && !t.transferAccountId && (
-                  <button onClick={() => setForm({ mode: 'ordinary', editing: t })}>Edit</button>
-                )}
-                {t.transferAccountId && <button onClick={() => setForm({ mode: 'transfer', editing: t })}>Edit</button>}
-                {t.isSplit && <button onClick={() => setForm({ mode: 'split', editing: t })}>Edit</button>}{' '}
-                <button onClick={() => handleDelete(t.id)}>Delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {data && data.transactions.length === 0 && <p>No transactions yet.</p>}
+      {data === null ? (
+        <p>Loading…</p>
+      ) : (
+        <div className="table-scroll">
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th align="left">Date</th>
+                <th align="left">Payee</th>
+                <th align="left">Category</th>
+                <th align="left">Memo</th>
+                <th align="right">Amount</th>
+                <th align="right">Balance</th>
+                <th>Cleared</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {data.transactions.map((t) => (
+                <tr key={t.id} style={{ borderTop: '1px solid #ddd' }}>
+                  <td>{t.date}</td>
+                  <td>{t.payeeName ?? ''}</td>
+                  <td>{t.isSplit ? '(split)' : t.categoryId ? (categoryNameById.get(t.categoryId) ?? '') : ''}</td>
+                  <td>{t.memo ?? ''}</td>
+                  <td align="right">{formatMinor(t.amountMinor)}</td>
+                  <td align="right">{formatMinor(t.balance)}</td>
+                  <td align="center">{t.cleared !== 'uncleared' ? '✓' : ''}</td>
+                  <td>
+                    {!t.isSplit && !t.transferAccountId && (
+                      <button onClick={() => setForm({ mode: 'ordinary', editing: t })}>Edit</button>
+                    )}
+                    {t.transferAccountId && <button onClick={() => setForm({ mode: 'transfer', editing: t })}>Edit</button>}
+                    {t.isSplit && <button onClick={() => setForm({ mode: 'split', editing: t })}>Edit</button>}{' '}
+                    <button onClick={() => handleDelete(t.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {data.transactions.length === 0 && <p>No transactions yet.</p>}
+        </div>
+      )}
     </section>
   );
 }

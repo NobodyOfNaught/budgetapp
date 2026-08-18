@@ -3,9 +3,10 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
 import { computeLedger } from '../domain/ledger';
-import type { MonthResult } from '../domain/types';
+import { computeTargets } from '../domain/targets';
+import type { MonthResult, TargetResult } from '../domain/types';
 import { getDb, type Db } from '../db/client';
-import { accounts, categories, categoryMonths, transactions } from '../db/schema';
+import { accounts, categories, categoryMonths, categoryTargets, transactions } from '../db/schema';
 import { nextMonth } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import { parseAmountToMinor } from '../lib/money';
@@ -13,17 +14,27 @@ import type { AppEnv } from '../types/hono';
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
 
+// The GET response shape — the pure ledger result plus targets/upcoming
+// math layered on top (src/domain/targets.ts). Kept local to this route
+// rather than added to domain/types.ts's MonthResult: MonthResult is the
+// ledger engine's own pure output, and targets are a separate concern
+// merged in at the API layer, not something the engine itself computes.
+interface MonthView extends MonthResult {
+  targets: Record<string, TargetResult>;
+}
+
 /**
  * Loads everything the ledger engine needs for one budget and folds it
  * forward through `month` (see docs/plan.md's "The ledger engine" — this
- * is the one place in the app that calls it). Accounts and categories are
- * fetched WITHOUT filtering hidden/deleted/closed: a category deleted last
- * week still needs to be here for last month's activity to compute
- * correctly. Filtering those out of what the UI *displays* is a separate
- * concern, already handled by GET /categories and GET /accounts.
+ * is the one place in the app that calls it), then layers computeTargets
+ * on top of that month's result. Accounts and categories are fetched
+ * WITHOUT filtering hidden/deleted/closed: a category deleted last week
+ * still needs to be here for last month's activity to compute correctly.
+ * Filtering those out of what the UI *displays* is a separate concern,
+ * already handled by GET /categories and GET /accounts.
  */
-async function computeMonthView(db: Db, budgetId: string, month: string): Promise<MonthResult> {
-  const [accountRows, categoryRows, categoryMonthRows, transactionRows] = await Promise.all([
+async function computeMonthView(db: Db, budgetId: string, month: string): Promise<MonthView> {
+  const [accountRows, categoryRows, categoryMonthRows, transactionRows, targetRows] = await Promise.all([
     db.select({ id: accounts.id, type: accounts.type, onBudget: accounts.onBudget }).from(accounts).where(eq(accounts.budgetId, budgetId)),
     db
       .select({ id: categories.id, kind: categories.kind, linkedAccountId: categories.linkedAccountId })
@@ -49,6 +60,16 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
       })
       .from(transactions)
       .where(and(eq(transactions.budgetId, budgetId), isNull(transactions.deletedAt), lt(transactions.date, nextMonth(month)))),
+    db
+      .select({
+        categoryId: categoryTargets.categoryId,
+        amountMinor: categoryTargets.amountMinor,
+        intervalUnit: categoryTargets.intervalUnit,
+        intervalCount: categoryTargets.intervalCount,
+        dueDate: categoryTargets.dueDate,
+      })
+      .from(categoryTargets)
+      .where(and(eq(categoryTargets.budgetId, budgetId), isNull(categoryTargets.deletedAt))),
   ]);
 
   const result = computeLedger({
@@ -59,7 +80,14 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
     throughMonth: month,
   });
 
-  return result.months[result.months.length - 1] ?? { month, readyToAssign: 0, categories: {} };
+  const monthResult: MonthResult = result.months[result.months.length - 1] ?? { month, readyToAssign: 0, categories: {} };
+  const targets = computeTargets({
+    targets: targetRows,
+    monthCategories: monthResult.categories,
+    month,
+  });
+
+  return { ...monthResult, targets };
 }
 
 const assignmentsSchema = z.object({

@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState } from 'react';
 import { apiFetch } from '../api';
-import type { CategoryGroup, MonthView } from '../types';
+import type { CategoryGroup, MonthView, TargetStatus, TargetView } from '../types';
+import { TargetForm } from './TargetForm';
+import { UpcomingPanel } from './UpcomingPanel';
 
 function formatMinor(minor: number): string {
   const sign = minor < 0 ? '-' : '';
@@ -19,6 +21,13 @@ function amountColor(minor: number): string {
   if (minor > 0) return '#0a7a2f';
   if (minor < 0) return '#c0392b';
   return '#666';
+}
+
+/** Unlike amountColor, a positive Needed is the thing to flag, not celebrate — zero is the good outcome here. */
+function neededColor(status: TargetStatus): string {
+  if (status === 'funded') return '#0a7a2f';
+  if (status === 'building') return '#666';
+  return '#c0392b';
 }
 
 function currentMonth(): string {
@@ -63,6 +72,12 @@ export function BudgetMonth({
   const [moveOpenFor, setMoveOpenFor] = useState<string | null>(null);
   const [moveAmount, setMoveAmount] = useState('');
   const [moveTargetId, setMoveTargetId] = useState('');
+  const [rawTargets, setRawTargets] = useState<Record<string, TargetView>>({});
+  const [targetOpenFor, setTargetOpenFor] = useState<string | null>(null);
+  // Bumped after a target is saved/removed — passed to UpcomingPanel so its
+  // own fetch (real-clock-anchored, not month-scoped — see that
+  // component's doc comment) picks up the change too.
+  const [targetsVersion, setTargetsVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   function reload() {
@@ -72,7 +87,24 @@ export function BudgetMonth({
     });
   }
 
+  function reloadTargets() {
+    apiFetch<{ targets: TargetView[] }>(`/budgets/${budgetId}/targets`).then((res) =>
+      setRawTargets(Object.fromEntries(res.targets.map((t) => [t.categoryId, t]))),
+    );
+  }
+
   useEffect(reload, [budgetId, month, refreshToken]);
+  // Targets aren't month-scoped, so budgetId is the only real dependency —
+  // month/refreshToken are listed anyway so a target set from elsewhere
+  // (none currently, but cheap insurance) can't leave this stale.
+  useEffect(reloadTargets, [budgetId, month, refreshToken]);
+
+  function targetSaved() {
+    setTargetOpenFor(null);
+    setTargetsVersion((v) => v + 1);
+    reloadTargets();
+    reload(); // the month view's `targets` (Needed/status) also needs refreshing
+  }
 
   const assignable: FlatCategory[] = categoryGroups.flatMap((g) =>
     g.categories.filter((c) => c.kind !== 'income' && !c.hiddenAt).map((c) => ({ id: c.id, name: c.name, groupName: g.name })),
@@ -108,6 +140,10 @@ export function BudgetMonth({
     setMoveOpenFor(categoryId);
     setMoveAmount('');
     setMoveTargetId(assignable.find((c) => c.id !== categoryId)?.id ?? '');
+  }
+
+  function toggleTarget(categoryId: string) {
+    setTargetOpenFor((current) => (current === categoryId ? null : categoryId));
   }
 
   async function submitMove(fromCategoryId: string) {
@@ -157,6 +193,8 @@ export function BudgetMonth({
 
       {error && <p style={{ color: '#c0392b' }}>{error}</p>}
 
+      <UpcomingPanel budgetId={budgetId} refreshToken={targetsVersion} />
+
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
@@ -164,6 +202,7 @@ export function BudgetMonth({
             <th align="right">Assigned</th>
             <th align="right">Activity</th>
             <th align="right">Available</th>
+            <th align="right">Needed</th>
             <th />
           </tr>
         </thead>
@@ -174,12 +213,13 @@ export function BudgetMonth({
             return (
               <Fragment key={group.id}>
                 <tr>
-                  <td colSpan={5} style={{ paddingTop: '1rem', fontWeight: 'bold', borderBottom: '1px solid #ccc' }}>
+                  <td colSpan={6} style={{ paddingTop: '1rem', fontWeight: 'bold', borderBottom: '1px solid #ccc' }}>
                     {group.name}
                   </td>
                 </tr>
                 {rows.map((c) => {
                   const amounts = view?.categories[c.id] ?? { assigned: 0, activity: 0, available: 0 };
+                  const target = view?.targets[c.id];
                   return (
                     <Fragment key={c.id}>
                       <tr style={{ borderTop: '1px solid #eee' }}>
@@ -201,13 +241,21 @@ export function BudgetMonth({
                         <td align="right" style={{ color: amountColor(amounts.available), fontWeight: 'bold' }}>
                           {formatMinor(amounts.available)}
                         </td>
+                        <td align="right" style={{ color: target ? neededColor(target.status) : '#999' }}>
+                          {target ? (
+                            target.status === 'funded' ? '✓ funded' : target.status === 'building' ? 'building' : formatMinor(target.neededMinor)
+                          ) : (
+                            '—'
+                          )}
+                        </td>
                         <td>
+                          <button onClick={() => toggleTarget(c.id)}>{rawTargets[c.id] ? 'Edit target' : 'Set target'}</button>{' '}
                           <button onClick={() => toggleMove(c.id)}>Move</button>
                         </td>
                       </tr>
                       {moveOpenFor === c.id && (
                         <tr>
-                          <td colSpan={5} style={{ background: '#fafafa', padding: '0.5rem' }}>
+                          <td colSpan={6} style={{ background: '#fafafa', padding: '0.5rem' }}>
                             Move{' '}
                             <input
                               value={moveAmount}
@@ -231,6 +279,20 @@ export function BudgetMonth({
                               Moves budgeted money from this category to the one you pick — the same move covers
                               overspending: move it into whichever category is negative.
                             </p>
+                          </td>
+                        </tr>
+                      )}
+                      {targetOpenFor === c.id && (
+                        <tr>
+                          <td colSpan={6} style={{ background: '#fafafa', padding: '0.5rem' }}>
+                            <TargetForm
+                              budgetId={budgetId}
+                              categoryId={c.id}
+                              existing={rawTargets[c.id]}
+                              onSaved={targetSaved}
+                              onCleared={targetSaved}
+                              onCancel={() => setTargetOpenFor(null)}
+                            />
                           </td>
                         </tr>
                       )}

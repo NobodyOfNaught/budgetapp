@@ -86,3 +86,40 @@ export interface LedgerResult {
   /** One entry per month from the earliest relevant month through `throughMonth`, chronological. */
   months: MonthResult[];
 }
+
+// ---------------------------------------------------------------------------
+// Targets — a category's funding obligation. See src/domain/targets.ts for
+// the derivation ("how much should I assign this month", "when's this next
+// due"). Deliberately its own module rather than folded into computeLedger:
+// the ledger is the record of what happened; targets are a standing rule
+// layered on top of that record, and neither needs the other's internals.
+// ---------------------------------------------------------------------------
+
+export type IntervalUnit = 'week' | 'month' | 'year' | 'once';
+
+export interface TargetRow {
+  categoryId: string;
+  amountMinor: number;
+  intervalUnit: IntervalUnit;
+  /** Ignored when intervalUnit is 'once'. */
+  intervalCount: number;
+  /** 'YYYY-MM-DD'. The first-ever occurrence for a recurring target, the
+   * deadline for a one-time target, or null for an open-ended savings goal
+   * with no deadline at all (only valid when intervalUnit is 'once'). */
+  dueDate: string | null;
+}
+
+export type TargetStatus = 'funded' | 'short' | 'building';
+
+export interface TargetResult {
+  categoryId: string;
+  /** The raw target amount, carried through for display next to `neededMinor`. */
+  amountMinor: number;
+  /** How much more to assign THIS month to stay on track. Falls to 0 as the
+   * user assigns — see computeTargets for the per-recurrence formulas. */
+  neededMinor: number;
+  /** First occurrence on or after the start of the month being computed,
+   * or null for a 'building' target, or an elapsed one-time target. */
+  nextDueDate: string | null;
+  status: TargetStatus;
+}

@@ -9,6 +9,7 @@ import { categoriesRoute } from './categories';
 import { payeesRoute } from './payees';
 import { accountRegisterRoute, transactionsRoute } from './transactions';
 import { monthsRoute } from './months';
+import { targetsRoute, upcomingRoute } from './targets';
 
 export const budgetsRoute = new Hono<AppEnv>();
 
@@ -50,3 +51,5 @@ budgetsRoute.route('/:budgetId/payees', payeesRoute);
 budgetsRoute.route('/:budgetId/transactions', transactionsRoute);
 budgetsRoute.route('/:budgetId/accounts/:accountId/transactions', accountRegisterRoute);
 budgetsRoute.route('/:budgetId/months', monthsRoute);
+budgetsRoute.route('/:budgetId/targets', targetsRoute);
+budgetsRoute.route('/:budgetId/upcoming', upcomingRoute);

@@ -238,6 +238,46 @@ export const categoryMonths = sqliteTable(
   ],
 );
 
+// A category's funding obligation — an amount, and how often/when it's
+// needed. This is deliberately NOT part of category_months: assigned is a
+// record of what actually happened each month, while a target is a
+// standing rule the app uses to derive "how much should I assign this
+// month" (src/domain/targets.ts). At most one LIVE target per category —
+// enforced by the partial unique index below, not application code.
+//
+// (interval_unit, interval_count) covers every recurrence with two small
+// fields instead of a sprawling enum — 'month'/1 is a monthly refill,
+// 'week'/3 is "every 3 weeks", 'month'/3 is quarterly, 'year'/1 is annual.
+// 'once' ignores interval_count and just means "by dueDate, one time" (or,
+// with dueDate NULL, an open-ended savings goal with no deadline at all).
+export const categoryTargets = sqliteTable(
+  'category_targets',
+  {
+    id: text('id').primaryKey(),
+    budgetId: text('budget_id')
+      .notNull()
+      .references(() => budgets.id),
+    categoryId: text('category_id')
+      .notNull()
+      .references(() => categories.id),
+    amountMinor: integer('amount_minor').notNull(),
+    intervalUnit: text('interval_unit', { enum: ['week', 'month', 'year', 'once'] })
+      .notNull()
+      .default('month'),
+    intervalCount: integer('interval_count').notNull().default(1),
+    dueDate: text('due_date'), // 'YYYY-MM-DD', nullable — see the 'once' note above
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [
+    index('category_targets_budget_idx').on(t.budgetId),
+    uniqueIndex('category_targets_category_idx')
+      .on(t.categoryId)
+      .where(sql`${t.deletedAt} is null`),
+  ],
+);
+
 // The hot table. Every column here is deliberate — see the plan's
 // "Transactions — the hot table" section for why budgetAmountMinor,
 // importId, and revision exist even though the MVP barely exercises them.

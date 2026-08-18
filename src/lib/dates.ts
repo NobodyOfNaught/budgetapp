@@ -1,7 +1,12 @@
-// Minimal calendar-month helpers. Dates are plain 'YYYY-MM-DD' strings and
+// Minimal calendar-date helpers. Dates are plain 'YYYY-MM-DD' strings and
 // months are 'YYYY-MM-01' strings (see docs/plan.md — a budget date is a
 // calendar date, not an instant, so there's no timezone handling anywhere
-// here on purpose). Pure string/integer math only.
+// here on purpose). The month helpers below are pure string/integer math;
+// the day-level helpers added for PR 6 (addDays/addMonths/addYears) use
+// `Date.UTC` purely as a calendar-arithmetic scratchpad — never `new
+// Date()`, never anything that reads wall-clock/local time — and always
+// convert straight back to a plain string. UTC here means "a fixed
+// reference," not "the transaction's timezone"; there still isn't one.
 
 /** Truncates a 'YYYY-MM-DD' date to its containing month, 'YYYY-MM-01'. */
 export function monthOf(date: string): string {
@@ -34,4 +39,60 @@ export function monthRange(start: string, end: string): string[] {
     months.push(m);
   }
   return months;
+}
+
+/** The number of month-steps from `a` to `b` ('YYYY-MM-01' or 'YYYY-MM-DD',
+ * truncated) — positive if `b` is later, negative if earlier. */
+export function monthsBetween(a: string, b: string): number {
+  const pa = parseMonth(monthOf(a));
+  const pb = parseMonth(monthOf(b));
+  return (pb.year - pa.year) * 12 + (pb.month - pa.month);
+}
+
+interface DateParts {
+  year: number;
+  month: number; // 1-12
+  day: number;
+}
+
+function parseDate(date: string): DateParts {
+  return { year: Number(date.slice(0, 4)), month: Number(date.slice(5, 7)), day: Number(date.slice(8, 10)) };
+}
+
+function formatDate(year: number, month: number, day: number): string {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function daysInMonth(year: number, month: number): number {
+  // Day 0 of the NEXT month is the last day of THIS one — Date.UTC handles
+  // the December-rollover and leap-year cases for free.
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** `date` plus `days` (may be negative), 'YYYY-MM-DD' in and out. */
+export function addDays(date: string, days: number): string {
+  const { year, month, day } = parseDate(date);
+  const d = new Date(Date.UTC(year, month - 1, day + days));
+  return formatDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+
+/**
+ * `date` plus `months` (may be negative), 'YYYY-MM-DD' in and out. Clamps
+ * the day-of-month into the target month rather than overflowing —
+ * Jan 31 + 1 month is Feb 28 (or Feb 29), not Mar 2/3. This is what keeps a
+ * target anchored on the 31st from silently drifting across the year; see
+ * test/domain/targets.test.ts's month-end clamping case.
+ */
+export function addMonths(date: string, months: number): string {
+  const { year, month, day } = parseDate(date);
+  const total = (year * 12 + (month - 1)) + months;
+  const targetYear = Math.floor(total / 12);
+  const targetMonth = (total % 12) + 1; // 1-12
+  const clampedDay = Math.min(day, daysInMonth(targetYear, targetMonth));
+  return formatDate(targetYear, targetMonth, clampedDay);
+}
+
+/** `date` plus `years` (may be negative) — same clamping as addMonths (Feb 29 -> Feb 28 on a non-leap year). */
+export function addYears(date: string, years: number): string {
+  return addMonths(date, years * 12);
 }

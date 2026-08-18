@@ -102,8 +102,41 @@ export interface CategoryMonthAmounts {
   available: number;
 }
 
+export type TargetIntervalUnit = 'week' | 'month' | 'year' | 'once';
+export type TargetStatus = 'funded' | 'short' | 'building';
+
+// Mirrors src/domain/types.ts's TargetResult, embedded in MonthView, and
+// src/routes/targets.ts's TargetView (the raw stored target from GET/PUT
+// .../targets), which is a slightly different, string-amount shape.
+export interface TargetResultView {
+  categoryId: string;
+  amountMinor: number;
+  neededMinor: number;
+  nextDueDate: string | null;
+  status: TargetStatus;
+}
+
 export interface MonthView {
   month: string;
   readyToAssign: number;
   categories: Record<string, CategoryMonthAmounts>;
+  targets: Record<string, TargetResultView>;
+}
+
+/** GET/PUT /budgets/:id/targets(/:categoryId) — the raw stored target, decimal amount like everywhere else at the API boundary. */
+export interface TargetView {
+  categoryId: string;
+  amount: string;
+  intervalUnit: TargetIntervalUnit;
+  intervalCount: number;
+  dueDate: string | null;
+}
+
+/** One entry from GET /budgets/:id/upcoming — a real calendar occurrence, independent of month boundaries. */
+export interface UpcomingOccurrence {
+  categoryId: string;
+  categoryName: string;
+  dueDate: string;
+  amountMinor: number;
+  lastPaidDate: string | null;
 }

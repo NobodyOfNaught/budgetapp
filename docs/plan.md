@@ -175,8 +175,10 @@ inferred from a rate table.
 ### Tables deliberately deferred
 
 `budget_invites`, `import_batches`, `payee_rules`, `exchange_rates`,
-`scheduled_transactions`, `category_targets`. All are additive — new tables referencing
-columns that already exist. None require touching `transactions`.
+`scheduled_transactions`. All are additive — new tables referencing columns that already
+exist. None require touching `transactions`.
+
+`category_targets` was on this list through PR 5 — it landed in PR 6 (see below).
 
 ---
 
@@ -361,14 +363,81 @@ worth recording:
   asserted directly against the route by inserting one with raw SQL in the test, so the
   defensive check is proven live rather than merely unreachable.
 
+**`category_targets` (Phase 2's targets/goals item) pulled forward and implemented in
+PR 6** — a category's funding obligation: an amount, and how often/when it's needed. It
+exists to answer a question the budget screen alone couldn't: *the month is the funding
+cadence, not the obligation's cadence.* A category's `available` is a running balance
+with no monthly reset (see the ledger engine section above) — a bill due every 3 weeks
+drifts across months and a quarterly bill isn't month-aligned at all, and neither fact
+requires the app to care, because nothing about the ledger math depends on it. What was
+missing was a layer that turns a real-world recurrence into "how much to assign this
+month" and "when's this actually due" — that's `src/domain/targets.ts`, and it's a
+second, deliberately separate pure module from the ledger engine, not a change to it.
+
+- **Schema**: one new table, `category_targets` (`id, budget_id, category_id,
+  amount_minor, interval_unit, interval_count, due_date`), with a partial unique index
+  enforcing one live target per category. `(interval_unit, interval_count)` —
+  `'week'|'month'|'year'|'once'` plus a count — covers every case (monthly refill,
+  "every 3 weeks", quarterly, annual, one-time-by-date, open-ended savings goal) with two
+  small fields instead of a sprawling enum. `migrations/0002_category_targets.sql` is a
+  pure new-table migration — the blessed expand/contract shape — so this promotes
+  feature → `uat` → `main`, **skipping `stg`** (see "Guarding the shared production
+  database"); `scripts/assert-schema-current.mjs` is supposed to reject an unapplied
+  migration on `stg`, and did.
+- **Four funding formulas, one function** (`computeTargets`): a monthly refill tops
+  `available` back up to the target, no date needed. A sub-monthly recurrence (the
+  "every 3 weeks" case) asks for a **smoothed, steady monthly rate** — `round(amount ×
+  (52 / intervalCount) / 12)` — rather than an amount that alternates with however many
+  occurrences land in a given month; a category funded this way visibly dips in a
+  two-occurrence month and recovers the next, which is the smoothing working, not drift.
+  Everything else (quarterly, annual, one-time-by-date) spreads the remaining gap evenly
+  across the months left before it's due. An elapsed one-time target, or a recurring
+  target missing its anchor date, both collapse into the same "no more months to spread
+  across, ask for the whole remaining gap now" case rather than needing their own branch.
+  An open-ended goal (`once` with no date) has no forced monthly ask at all — just a
+  running total.
+- **A real double-counting bug, caught by hand-deriving a partially-assigned example
+  before writing the golden tests**, not by a failing test: the first draft of the
+  "spread the gap" formula computed the gap from `available` (which already includes
+  whatever's been assigned this month) and then ALSO subtracted this month's assignment
+  from the result — netting it out twice. Fixed by computing the gap from `available`
+  with this month's own assignment backed out first (`baseAvailable = available -
+  assignedThisMonth`), then subtracting the assignment only once, in the final step.
+- **A real date-arithmetic bug, caught by the leap-year golden test**: walking a
+  recurring occurrence forward was implemented by repeatedly adding one interval to the
+  *previous computed occurrence*. `addMonths` clamps the day-of-month (Jan 31 + 1 month →
+  Feb 28), so stepping off an already-clamped result carried that clamp forward
+  permanently — Feb 28 + 1 month became Mar 28, silently losing the 31st forever instead
+  of correctly landing on Mar 31. Fixed by always computing each candidate occurrence
+  fresh from the *original* anchor date (`occurrenceAtStep`), never by adding to a
+  previous result — exported and reused by `GET /upcoming`'s own occurrence walk for the
+  same reason.
+- **Two separate clocks, two separate computations, on purpose.** `computeTargets` takes
+  no "today" — like the ledger engine, it's a pure fold over data plus a target *month*,
+  and browsing forward a month is what advances `nextDueDate`. `GET
+  /budgets/:id/upcoming` is the deliberately real-clock-anchored counterpart — "what's
+  due in the next N days from right now" — and is a genuinely different question with a
+  genuinely different answer; `UpcomingPanel` ("Coming up") is not month-scoped at all,
+  which is the direct answer to *why bills due every 3 weeks or every 3 months don't need
+  month boundaries to make sense.*
+- UI: a per-category inline target editor (`TargetForm.tsx`), a **Needed** column on the
+  budget screen with a funded/short/building indicator, and the "Coming up" panel above
+  the budget table. A real-browser smoke test caught two locator bugs in the test script
+  itself (not the app) worth recording as a general lesson: a Playwright locator that
+  filters on "has a button labeled X" is a moving target if the action under test changes
+  that very button's label (`Set target` → `Edit target`) — a later re-evaluation of the
+  *same* locator can silently resolve to a *different* row. Fixed by locating rows by
+  stable identity (category name) instead of by mutable UI state.
+
 ---
 
 ## Roadmap
 
-**Phase 2 — Make it a budgeting tool, not a ledger.** Category targets/goals (monthly,
-by-date, refill vs. build). Reports: spending by category, income vs. expense, net worth.
-Scheduled/recurring transactions (`scheduled_transactions` table; `transactions.scheduled_transaction_id`
-already exists). Full reconciliation with adjustment transactions.
+**Phase 2 — Make it a budgeting tool, not a ledger.** ~~Category targets/goals (monthly,
+by-date, refill vs. build).~~ **Landed in PR 6** — see below. Reports: spending by
+category, income vs. expense, net worth. Scheduled/recurring transactions
+(`scheduled_transactions` table; `transactions.scheduled_transaction_id` already exists).
+Full reconciliation with adjustment transactions.
 
 **Phase 3 — Shared budgets.** `budget_invites` table, invite-by-email reusing the
 magic-link token machinery. Roles enforced at the route layer — authorization already

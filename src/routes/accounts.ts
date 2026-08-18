@@ -31,6 +31,10 @@ const createAccountSchema = z.object({
   note: z.string().trim().max(2000).optional(),
   startingBalance: z.string().optional(),
   startingBalanceDate: dateSchema.optional(),
+  /** ISO 4217, defaults to the budget's. A currency other than the budget's forces the account off-budget — see below. */
+  currencyCode: z.string().trim().length(3).toUpperCase().optional(),
+  /** Which statement parser this account's files use, when it was set up for import. */
+  importProvider: z.string().trim().min(1).max(40).optional(),
 });
 
 const updateAccountSchema = z.object({
@@ -68,7 +72,18 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   const [budget] = await db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1);
   if (!budget) return c.json({ error: 'not_found' }, 404);
 
-  const onBudget = input.onBudget ?? !input.type.startsWith('tracking_');
+  const currencyCode = input.currencyCode ?? budget.currencyCode;
+  // A foreign-currency account is forced OFF-budget. Budget math sums
+  // budgetAmountMinor, which needs a real conversion rate per transaction —
+  // and statement files supply one only where a conversion actually
+  // happened (a CAD purchase from a CAD balance has no CAD->USD rate in
+  // it). Rather than invent rates, such accounts track their balance
+  // faithfully and stay out of categories/Ready to Assign; money crossing
+  // into the budget does so as a transfer, which the ledger engine now
+  // treats as income (see src/domain/ledger.ts). Fully budgetable
+  // foreign-currency accounts are phase-5 work — see docs/plan.md.
+  const isForeignCurrency = currencyCode !== budget.currencyCode;
+  const onBudget = isForeignCurrency ? false : (input.onBudget ?? !input.type.startsWith('tracking_'));
   const accountId = ulid(now);
 
   await db.insert(accounts).values({
@@ -77,7 +92,8 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     name: input.name,
     type: input.type,
     onBudget,
-    currencyCode: budget.currencyCode,
+    currencyCode,
+    importProvider: input.importProvider ?? null,
     note: input.note ?? null,
     createdAt: now,
     updatedAt: now,
@@ -106,7 +122,7 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
           accountId,
           date: input.startingBalanceDate ?? todayUtc(),
           amountMinor: minor,
-          currencyCode: budget.currencyCode,
+          currencyCode,
           cleared: 'cleared',
         },
         now,
@@ -114,7 +130,15 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     }
   }
 
-  return c.json({ account: { id: accountId, name: input.name, type: input.type, onBudget, currencyCode: budget.currencyCode } }, 201);
+  return c.json(
+    {
+      account: { id: accountId, name: input.name, type: input.type, onBudget, currencyCode },
+      // Surfaced so the UI can explain the demotion rather than silently
+      // producing an account that doesn't behave the way the user picked.
+      forcedOffBudget: isForeignCurrency,
+    },
+    201,
+  );
 });
 
 accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {

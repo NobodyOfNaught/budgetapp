@@ -55,6 +55,7 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
         budgetAmountMinor: transactions.budgetAmountMinor,
         categoryId: transactions.categoryId,
         transferTransactionId: transactions.transferTransactionId,
+        transferAccountId: transactions.transferAccountId,
         parentTransactionId: transactions.parentTransactionId,
         deletedAt: transactions.deletedAt,
       })

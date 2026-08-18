@@ -2,19 +2,24 @@ import { useEffect, useState } from 'react';
 import { apiFetch } from '../api';
 import { AccountForm } from '../components/AccountForm';
 import { BudgetMonth } from '../components/BudgetMonth';
+import { ImportForm } from '../components/ImportForm';
 import { Register } from '../components/Register';
-import type { Account, CategoryGroup } from '../types';
+import { ReviewImport } from '../components/ReviewImport';
+import type { Account, CategoryGroup, ReviewTransaction } from '../types';
 
 // 'budget' is the landing view (the month screen), matching YNAB itself;
 // picking an account switches to 'account'. Local state, not a URL route —
 // see App.tsx's comment on why there's no router here yet.
-type View = { kind: 'budget' } | { kind: 'account'; accountId: string };
+type View = { kind: 'budget' } | { kind: 'account'; accountId: string } | { kind: 'review' };
 
 export function Budget({ budgetId }: { budgetId: string }) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[] | null>(null);
   const [view, setView] = useState<View>({ kind: 'budget' });
   const [showAccountForm, setShowAccountForm] = useState(false);
+  const [showImportForm, setShowImportForm] = useState(false);
+  // Count of imported-but-unapproved rows, for the Review badge.
+  const [unapprovedCount, setUnapprovedCount] = useState(0);
   // Bumped whenever an account is created — a new account (starting balance
   // as income, or a fresh credit-card payment category) can change Ready to
   // Assign and category availability. BudgetMonth stays mounted while an
@@ -30,6 +35,12 @@ export function Budget({ budgetId }: { budgetId: string }) {
     });
   }
 
+  function reloadUnapproved() {
+    apiFetch<{ transactions: ReviewTransaction[] }>(`/budgets/${budgetId}/imports/review`).then((res) =>
+      setUnapprovedCount(res.transactions.length),
+    );
+  }
+
   function reloadCategories() {
     apiFetch<{ groups: CategoryGroup[] }>(`/budgets/${budgetId}/categories`).then((res) => setCategoryGroups(res.groups));
   }
@@ -40,6 +51,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
   useEffect(() => {
     reloadAccounts();
     reloadCategories();
+    reloadUnapproved();
   }, [budgetId]);
 
   // Both start `null` specifically so this can tell "still loading" apart
@@ -57,6 +69,11 @@ export function Budget({ budgetId }: { budgetId: string }) {
           <li>
             <button onClick={() => setView({ kind: 'budget' })} style={{ fontWeight: view.kind === 'budget' ? 'bold' : 'normal' }}>
               Budget
+            </button>
+          </li>
+          <li>
+            <button onClick={() => setView({ kind: 'review' })} style={{ fontWeight: view.kind === 'review' ? 'bold' : 'normal' }}>
+              Review{unapprovedCount > 0 ? ` (${unapprovedCount})` : ''}
             </button>
           </li>
         </ul>
@@ -103,6 +120,26 @@ export function Budget({ budgetId }: { budgetId: string }) {
             onCancel={() => setShowAccountForm(false)}
           />
         )}
+        {accounts.length > 0 && (
+          <button onClick={() => setShowImportForm((v) => !v)}>{showImportForm ? 'Cancel' : 'Import file'}</button>
+        )}
+        {showImportForm && (
+          <ImportForm
+            budgetId={budgetId}
+            accounts={accounts}
+            onImported={() => {
+              // An import can create a currency sub-account and always adds
+              // unapproved rows, so refresh both before the user lands on
+              // the review queue.
+              reloadAccounts();
+              reloadUnapproved();
+            }}
+            onCancel={() => {
+              setShowImportForm(false);
+              setView({ kind: 'review' });
+            }}
+          />
+        )}
       </nav>
 
       <div style={{ flex: 1 }}>
@@ -112,6 +149,16 @@ export function Budget({ budgetId }: { budgetId: string }) {
             categoryGroups={categoryGroups}
             refreshToken={accountsVersion}
             hasAccounts={accounts.length > 0}
+          />
+        )}
+        {view.kind === 'review' && (
+          <ReviewImport
+            budgetId={budgetId}
+            categoryGroups={categoryGroups}
+            onChanged={() => {
+              reloadUnapproved();
+              setAccountsVersion((v) => v + 1); // approving changes category activity
+            }}
           />
         )}
         {view.kind === 'account' &&

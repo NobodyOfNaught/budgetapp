@@ -54,6 +54,7 @@ export async function callJson<T>(
 // only means updating it here.
 const TABLES_CHILDREN_FIRST = [
   'transactions',
+  'import_batches',
   'category_months',
   'category_targets',
   'categories',

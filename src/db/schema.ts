@@ -139,6 +139,11 @@ export const accounts = sqliteTable(
     // defaults every account to the budget's currency and the UI never
     // offers anything else; the column just has to already exist.
     currencyCode: text('currency_code').notNull(),
+    // Which statement-import parser this account's files use ('wise', ...),
+    // set when the account is created from an import. Purely a convenience
+    // so a repeat import doesn't re-ask; nothing keys off it. See
+    // src/import/ for the provider registry.
+    importProvider: text('import_provider'),
     closedAt: integer('closed_at'),
     sortOrder: integer('sort_order').notNull().default(0),
     note: text('note'),
@@ -340,4 +345,31 @@ export const transactions = sqliteTable(
       .on(t.accountId, t.importId)
       .where(sql`${t.importId} is not null`),
   ],
+);
+
+// One statement-import run. `transactions.import_batch_id` points here, so
+// "undo that import" is a single query rather than a guess about which rows
+// came from where. Deliberately records the SKIPPED count too: a parser that
+// silently drops rows it doesn't understand is worse than one that says so —
+// see src/import/wise.ts, which skips reversed transfers and non-completed
+// statuses by design.
+export const importBatches = sqliteTable(
+  'import_batches',
+  {
+    id: text('id').primaryKey(),
+    budgetId: text('budget_id')
+      .notNull()
+      .references(() => budgets.id),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id),
+    provider: text('provider').notNull(),
+    filename: text('filename').notNull(),
+    rowCount: integer('row_count').notNull().default(0),
+    importedCount: integer('imported_count').notNull().default(0),
+    skippedCount: integer('skipped_count').notNull().default(0),
+    createdAt: integer('created_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [index('import_batches_budget_idx').on(t.budgetId)],
 );

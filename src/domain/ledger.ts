@@ -195,15 +195,32 @@ function accumulateMonth(
       continue;
     }
 
-    // Uncategorized. A transfer with no explicit category is the common
-    // case (checking -> savings) and means exactly what it looks like:
-    // money moving between the user's own on-budget accounts, no category
-    // or Ready to Assign effect either way. Critically, this is also what
-    // keeps a credit-card PAYMENT from being double-counted: the card-side
-    // leg of a payment is an uncategorized transfer, so it lands here and
+    // Uncategorized. A transfer with no explicit category between two
+    // ON-BUDGET accounts (checking -> savings) means exactly what it looks
+    // like: money moving within the budget, no category or Ready to Assign
+    // effect either way. Critically, this is also what keeps a credit-card
+    // PAYMENT from being double-counted: the card-side leg of a payment is
+    // an uncategorized transfer between two on-budget accounts, so it
     // contributes nothing — only the checking-side leg (categorized to the
     // payment category, handled above) drains the earmark.
-    if (isTransfer) continue;
+    //
+    // A transfer crossing the on-budget/off-budget boundary is a different
+    // thing entirely, and gets the opposite treatment: money arriving from
+    // a tracking account (an investment withdrawal, or — see src/import/ —
+    // a foreign-currency balance converted into the budget's currency) is
+    // NEW money to assign, and money sent out to one has left the budget.
+    // Both are Ready to Assign movements, exactly like an uncategorized
+    // inflow/outflow on an ordinary account, which is what the
+    // `incomeThisMonth` line below already does for the non-transfer case.
+    if (isTransfer) {
+      const counterpart = row.transferAccountId !== null ? accountsById.get(row.transferAccountId) : undefined;
+      // Unknown counterpart stays a no-op rather than guessing — inventing
+      // Ready to Assign out of a data gap is the worse failure.
+      if (counterpart && !counterpart.onBudget) {
+        incomeThisMonth += row.budgetAmountMinor;
+      }
+      continue;
+    }
 
     if (isCredit) {
       // Uncategorized card activity (most commonly a starting balance —

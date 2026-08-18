@@ -103,7 +103,15 @@ export function Register({
             <tbody>
               {data.transactions.map((t) => (
                 <tr key={t.id} style={{ borderTop: '1px solid #ddd' }}>
-                  <td>{t.date}</td>
+                  <td>
+                    {t.date}
+                    {!t.approved && (
+                      <span title="Imported — waiting in Review" style={{ color: '#b8860b' }}>
+                        {' '}
+                        ●
+                      </span>
+                    )}
+                  </td>
                   <td>{t.payeeName ?? ''}</td>
                   <td>{t.isSplit ? '(split)' : t.categoryId ? (categoryNameById.get(t.categoryId) ?? '') : ''}</td>
                   <td>{t.memo ?? ''}</td>

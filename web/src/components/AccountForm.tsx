@@ -16,6 +16,8 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
   const [name, setName] = useState('');
   const [type, setType] = useState<AccountType>('checking');
   const [startingBalance, setStartingBalance] = useState('');
+  const [currencyCode, setCurrencyCode] = useState('');
+  const [importProvider, setImportProvider] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,6 +32,8 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
           name,
           type,
           startingBalance: startingBalance.trim() || undefined,
+          currencyCode: currencyCode.trim() || undefined,
+          importProvider: importProvider || undefined,
         }),
       });
       onCreated();
@@ -69,6 +73,33 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
             placeholder="0.00"
             inputMode="decimal"
           />
+        </label>
+      </div>
+      <div>
+        <label>
+          Currency{' '}
+          <input
+            value={currencyCode}
+            onChange={(e) => setCurrencyCode(e.target.value.toUpperCase())}
+            placeholder="(budget's)"
+            maxLength={3}
+            style={{ width: '5rem' }}
+          />
+        </label>
+        {currencyCode.length === 3 && (
+          <span style={{ color: '#666', fontSize: '0.9em' }}>
+            {' '}
+            — a currency other than your budget&apos;s is tracked but stays out of category budgeting.
+          </span>
+        )}
+      </div>
+      <div>
+        <label>
+          Statement files from{' '}
+          <select value={importProvider} onChange={(e) => setImportProvider(e.target.value)}>
+            <option value="">(none — manual entry)</option>
+            <option value="wise">Wise</option>
+          </select>
         </label>
       </div>
       {error && <p style={{ color: 'crimson' }}>{error}</p>}

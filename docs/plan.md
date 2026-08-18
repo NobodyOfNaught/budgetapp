@@ -174,11 +174,12 @@ inferred from a rate table.
 
 ### Tables deliberately deferred
 
-`budget_invites`, `import_batches`, `payee_rules`, `exchange_rates`,
-`scheduled_transactions`. All are additive — new tables referencing columns that already
-exist. None require touching `transactions`.
+`budget_invites`, `payee_rules`, `exchange_rates`, `scheduled_transactions`. All are
+additive — new tables referencing columns that already exist. None require touching
+`transactions`.
 
-`category_targets` was on this list through PR 5 — it landed in PR 6 (see below).
+`category_targets` was on this list through PR 5 — it landed in PR 6. `import_batches`
+was on it through PR 6 — it landed in PR 7 (both below).
 
 ---
 
@@ -468,6 +469,62 @@ schema change. A few things worth recording:
   `category_targets`) to use the full app-only promotion path — feature → `uat` → `stg`
   → `main` — rather than skipping `stg`.
 
+**Statement import landed in PR 7** (`src/import/`, `src/routes/imports.ts`,
+`import_batches`), driven by a real Wise export. Phase 4's CSV item is therefore partly
+done — see the roadmap. What the file itself forced:
+
+- **One purchase can span several rows sharing an ID.** When Wise funds a card payment
+  from more than one currency balance it emits a row per balance:
+  `CARD_TRANSACTION-4145111585` is 15.70 CAD → 11.18 USD *plus* 23.32 USD → 23.32 USD,
+  one $34.50 purchase. **Deduplicating on the ID column alone silently drops real
+  money**, so `src/import/wise.ts` groups by id and only then decides what a group means.
+- **Fees sit outside the amount columns.** "Source amount (after fees)" is post-fee,
+  verified against the export: `1136.36 CAD × 0.704002 = 800.00 USD` exactly, with the
+  5.76 CAD fee on top. Every emitted amount is therefore amount + fee.
+- **The split-currency model: a cross-currency transfer plus a full-value purchase.**
+  Rather than truncating the purchase to its same-currency leg (balance-accurate, spend-
+  wrong) or summing the legs onto one account (spend-accurate, balance-wrong), the
+  foreign-funded part becomes an explicit conversion into the charged currency:
+  ```
+  transfer  Wise CAD → Wise USD   −15.77 CAD / +11.18 USD
+  purchase  Wise USD, Taste of Europe        −34.50 USD  [Groceries]
+  ```
+  Both balances then reconcile to the cent AND the category sees the real $34.50. This is
+  exactly what `insertTransferPair` was already built for — each leg carries its own
+  currency and magnitude, and the effective rate is the ratio between them, no rate table
+  involved. Verified end-to-end: importing the real 44-row file produces a USD balance of
+  −1373.91 and a CAD balance of −1276.72, both matching an independent computation
+  straight from the raw file.
+- **Scoped multi-currency, not phase 5.** Accounts may now be created in any currency,
+  but one that isn't the budget's is forced **off-budget**: budget math sums
+  `budgetAmountMinor`, which needs a real per-transaction rate, and statement files supply
+  one only where a conversion actually happened (a CAD purchase from a CAD balance carries
+  no CAD→USD rate). Rather than invent rates, such accounts track their balance faithfully
+  and stay out of categories/RTA. Fully budgetable foreign accounts remain phase-5 work.
+- **A real pre-existing ledger bug this surfaced.** `accumulateMonth` bailed on *any*
+  uncategorized transfer leg, so a transfer between an on-budget and an off-budget account
+  had no Ready-to-Assign effect at all — money could enter or leave the budget entirely
+  unrecorded, breaking the "sum of every category's available + RTA == on-budget cash"
+  invariant by the transferred amount. Fixed by giving the domain `TransactionRow` a
+  `transferAccountId` and treating a boundary-crossing leg as income. **An existing test
+  asserted the buggy behaviour** (`readyToAssign` staying 0 on a transfer to a tracking
+  account); its expectation was corrected with the reasoning recorded inline, and mirror
+  cases added in both directions plus a defensive unknown-counterpart no-op.
+- **Imported rows are real transactions with `approved = false`**, not a staging table —
+  reusing three columns 0000_init.sql already carried for this. They move balances and RTA
+  immediately (an uncategorized outflow correctly pulls RTA down; categorizing moves it
+  into category activity), and the review queue is a filter over them. `import_batch_id`
+  makes "undo this import" one query, which matters precisely because import writes real
+  rows.
+- **Skipped rows are reported, never silent.** Only `COMPLETED` and inbound `REFUNDED`
+  import; an *outbound* refund is a bounced transfer whose money already came back, with
+  no return row in the export, so importing it would double-count the outflow. The one
+  such row in the sample file is surfaced by reference and reason in the import summary.
+- Wise's own Category column pre-fills the review screen where a confident match exists
+  (Groceries→Groceries, Transport→Transportation, Eating out→Dining Out,
+  Entertainment→Fun Money, Bills→Utilities). Vague labels — General, Money added, Personal
+  care — are deliberately left blank rather than guessed at.
+
 ---
 
 ## Roadmap
@@ -484,8 +541,10 @@ reads `budget_members`, so this is mostly UI. Activity log from the `revision` s
 Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the same budget
 see each other's edits.
 
-**Phase 4 — Statement import.** CSV first with a column-mapping UI and per-bank saved
-mappings; then OFX/QFX/QIF (structured, carries FITID); PDF last. Uploads land in R2,
+**Phase 4 — Statement import.** *Partially landed in PR 7* — per-provider CSV parsers
+(Wise first), an approve-imported-transactions queue, and idempotent re-import. Still to
+come: a column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
+(structured, carries FITID); PDF last. Uploads land in R2,
 parsing runs through Queues for anything large. `import_batches` tracks a run;
 `transactions.import_id` makes re-imports idempotent. Auto-categorization via a
 `payee_rules` table plus learned payee→category frequency, surfaced as an "approve

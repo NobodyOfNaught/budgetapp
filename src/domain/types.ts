@@ -52,8 +52,12 @@ export interface TransactionRow {
   /** Signed, already converted to the budget's display currency — see docs/plan.md. */
   budgetAmountMinor: number;
   categoryId: string | null;
-  /** Set on both legs of a transfer. Which account the other leg is on doesn't matter to this engine. */
+  /** Set on both legs of a transfer. */
   transferTransactionId: string | null;
+  /** The account the OTHER leg of a transfer sits on. Needed because a transfer
+   * crossing the on-budget/off-budget boundary is real money entering or leaving
+   * the budget, unlike one between two on-budget accounts — see computeLedger. */
+  transferAccountId: string | null;
   /** Set on split children. The parent itself is excluded from ledger math — its children carry it. */
   parentTransactionId: string | null;
   deletedAt: number | null;

@@ -33,21 +33,30 @@ function txn(
     budgetAmountMinor: Math.round(dollars * 100),
     categoryId: null,
     transferTransactionId: null,
+    transferAccountId: null,
     parentTransactionId: null,
     deletedAt: null,
     ...overrides,
   };
 }
 
-/** A same-transferTransactionId pair, one leg per account. */
+/** A same-transferTransactionId pair, one leg per account, each pointing at the other's account. */
 function transferPair(
   legA: { accountId: string; date: string; dollars: number; categoryId?: string },
   legB: { accountId: string; date: string; dollars: number; categoryId?: string },
 ): [TransactionRow, TransactionRow] {
   const id = `xfer${++txnSeq}`;
   return [
-    txn(legA.accountId, legA.date, legA.dollars, { transferTransactionId: id, categoryId: legA.categoryId ?? null }),
-    txn(legB.accountId, legB.date, legB.dollars, { transferTransactionId: id, categoryId: legB.categoryId ?? null }),
+    txn(legA.accountId, legA.date, legA.dollars, {
+      transferTransactionId: id,
+      transferAccountId: legB.accountId,
+      categoryId: legA.categoryId ?? null,
+    }),
+    txn(legB.accountId, legB.date, legB.dollars, {
+      transferTransactionId: id,
+      transferAccountId: legA.accountId,
+      categoryId: legB.categoryId ?? null,
+    }),
   ];
 }
 
@@ -249,7 +258,15 @@ describe('transfers', () => {
     expect(result.months[0]?.readyToAssign).toBe(0);
   });
 
-  it('a transfer to a tracking account produces no category activity either', () => {
+  it('a transfer OUT to a tracking account leaves categories alone but takes the money out of Ready to Assign', () => {
+    // Crossing the on-budget/off-budget boundary is NOT the same as an
+    // internal checking -> savings move. $50 left the budget entirely, so
+    // Ready to Assign has to fall by $50 or the budget would claim money
+    // that is no longer in any on-budget account. (This assertion
+    // originally read `toBe(0)`, which encoded a real bug: on-budget cash
+    // dropped $50 while the budget's own total stayed put, breaking the
+    // "sum of every category's available + RTA == on-budget cash"
+    // invariant by exactly the transferred amount.)
     const [checkingLeg, trackingLeg] = transferPair(
       { accountId: 'checking', date: M1, dollars: -50 },
       { accountId: 'investing', date: M1, dollars: 50 },
@@ -259,6 +276,45 @@ describe('transfers', () => {
       categories: [category('groceries')],
       categoryMonths: [],
       transactions: [checkingLeg, trackingLeg],
+      throughMonth: M1,
+    });
+
+    expect(result.months[0]?.categories.groceries?.activity).toBe(0);
+    expect(result.months[0]?.readyToAssign).toBe(-5000);
+  });
+
+  it('a transfer IN from a tracking account is new money to assign', () => {
+    // The mirror image, and the case statement import leans on: money
+    // arriving from off-budget (an investment withdrawal, or a
+    // foreign-currency balance converted into the budget's currency — see
+    // src/import/wise.ts) has never been budgeted before, so it lands in
+    // Ready to Assign exactly like any other income.
+    const [trackingLeg, checkingLeg] = transferPair(
+      { accountId: 'investing', date: M1, dollars: -50 },
+      { accountId: 'checking', date: M1, dollars: 50 },
+    );
+    const result = computeLedger({
+      accounts: [account('checking', 'checking'), account('investing', 'tracking_asset', false)],
+      categories: [category('groceries')],
+      categoryMonths: [],
+      transactions: [trackingLeg, checkingLeg],
+      throughMonth: M1,
+    });
+
+    expect(result.months[0]?.categories.groceries?.activity).toBe(0);
+    expect(result.months[0]?.readyToAssign).toBe(5000);
+  });
+
+  it('a transfer whose counterpart account is unknown is a no-op, not invented income', () => {
+    // Defensive: a dangling transferAccountId should never conjure Ready
+    // to Assign out of a data gap. Degrade to "no effect", the same way
+    // the credit-card branch degrades when a payment category is missing.
+    const orphan = txn('checking', M1, 50, { transferTransactionId: 'xfer-missing', transferAccountId: 'no-such-account' });
+    const result = computeLedger({
+      accounts: [account('checking', 'checking')],
+      categories: [category('groceries')],
+      categoryMonths: [],
+      transactions: [orphan],
       throughMonth: M1,
     });
 

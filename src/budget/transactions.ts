@@ -20,14 +20,24 @@ export interface NewTransactionInput {
   transferTransactionId?: string | null;
   transferAccountId?: string | null;
   parentTransactionId?: string | null;
+  /** Value in the BUDGET's currency. Defaults to amountMinor (same-currency case). */
+  budgetAmountMinor?: number;
+  /** Statement-import provenance — see src/import/ and the partial unique index on (account_id, import_id). */
+  importId?: string | null;
+  importBatchId?: string | null;
+  importPayeeRaw?: string | null;
+  /** Imported rows land unapproved so they surface in the review queue; manual entry is approved outright. */
+  approved?: boolean;
 }
 
 /**
- * Inserts a single ordinary transaction row. budgetAmountMinor equals
- * amountMinor for now — the MVP assumes one display currency, so there's no
- * real conversion yet. This is the one line that changes when multi-
- * currency ships; everything downstream (the ledger engine, every report)
- * already sums budgetAmountMinor, not amountMinor — see docs/plan.md.
+ * Inserts a single ordinary transaction row. budgetAmountMinor defaults to
+ * amountMinor — correct whenever the account's currency IS the budget's,
+ * which is every manually-entered transaction. Callers holding a real
+ * conversion (statement import, which gets a per-row rate from the file
+ * itself — see src/import/wise.ts) pass it explicitly. Everything
+ * downstream (the ledger engine, every report) sums budgetAmountMinor, not
+ * amountMinor, so that override is the whole multi-currency seam.
  */
 export async function insertTransaction(db: Db, input: NewTransactionInput, now: number): Promise<string> {
   const id = input.id ?? ulid(now);
@@ -38,7 +48,7 @@ export async function insertTransaction(db: Db, input: NewTransactionInput, now:
     date: input.date,
     amountMinor: input.amountMinor,
     currencyCode: input.currencyCode,
-    budgetAmountMinor: input.amountMinor,
+    budgetAmountMinor: input.budgetAmountMinor ?? input.amountMinor,
     categoryId: input.categoryId ?? null,
     payeeId: input.payeeId ?? null,
     memo: input.memo ?? null,
@@ -46,6 +56,10 @@ export async function insertTransaction(db: Db, input: NewTransactionInput, now:
     transferTransactionId: input.transferTransactionId ?? null,
     transferAccountId: input.transferAccountId ?? null,
     parentTransactionId: input.parentTransactionId ?? null,
+    importId: input.importId ?? null,
+    importBatchId: input.importBatchId ?? null,
+    importPayeeRaw: input.importPayeeRaw ?? null,
+    approved: input.approved ?? true,
     createdAt: now,
     updatedAt: now,
   });
@@ -122,6 +136,10 @@ interface TransferLeg {
   currencyCode: string;
   amountMinor: number;
   categoryId?: string | null;
+  /** Value in the BUDGET's currency; defaults to amountMinor. Set per leg on a cross-currency transfer. */
+  budgetAmountMinor?: number;
+  /** Per-leg dedupe key. The two legs sit on different accounts but must not collide if they ever share one. */
+  importId?: string | null;
 }
 
 /**
@@ -143,6 +161,8 @@ export async function insertTransferPair(
     date: string;
     memo: string | null;
     cleared: ClearedStatus;
+    importBatchId?: string | null;
+    approved?: boolean;
   },
   now: number,
 ): Promise<{ fromId: string; toId: string }> {
@@ -166,6 +186,10 @@ export async function insertTransferPair(
       cleared: input.cleared,
       transferTransactionId: toId,
       transferAccountId: input.to.accountId,
+      budgetAmountMinor: input.from.budgetAmountMinor,
+      importId: input.from.importId ?? null,
+      importBatchId: input.importBatchId ?? null,
+      approved: input.approved,
     },
     now,
   );
@@ -184,6 +208,10 @@ export async function insertTransferPair(
       cleared: input.cleared,
       transferTransactionId: fromId,
       transferAccountId: input.from.accountId,
+      budgetAmountMinor: input.to.budgetAmountMinor,
+      importId: input.to.importId ?? null,
+      importBatchId: input.importBatchId ?? null,
+      approved: input.approved,
     },
     now,
   );

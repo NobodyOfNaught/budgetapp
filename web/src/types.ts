@@ -83,6 +83,8 @@ export interface RegisterTransaction {
   payeeId: string | null;
   payeeName: string | null;
   transferAccountId: string | null;
+  /** false for statement-imported rows still awaiting review — see ReviewImport.tsx. */
+  approved: boolean;
   isSplit: boolean;
   balance: number;
 }
@@ -139,4 +141,39 @@ export interface UpcomingOccurrence {
   dueDate: string;
   amountMinor: number;
   lastPaidDate: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Statement import — mirrors src/routes/imports.ts. See src/import/ for the
+// per-provider parsers these shapes come out of.
+// ---------------------------------------------------------------------------
+
+export interface ImportSkippedRow {
+  reference: string;
+  reason: string;
+}
+
+export interface ImportSummary {
+  batchId: string;
+  rowCount: number;
+  imported: number;
+  duplicates: number;
+  skipped: ImportSkippedRow[];
+  /** Currency sub-accounts the file turned out to need, created on the fly. */
+  accountsCreated: string[];
+}
+
+/** One row awaiting review — imported but not yet approved. */
+export interface ReviewTransaction {
+  id: string;
+  date: string;
+  amountMinor: number;
+  currencyCode: string;
+  categoryId: string | null;
+  memo: string | null;
+  accountId: string;
+  accountName: string;
+  payeeName: string | null;
+  importPayeeRaw: string | null;
+  transferAccountId: string | null;
 }

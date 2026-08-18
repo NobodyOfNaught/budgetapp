@@ -391,6 +391,7 @@ accountRegisterRoute.get('/', async (c) => {
       payeeId: transactions.payeeId,
       payeeName: payees.name,
       transferAccountId: transactions.transferAccountId,
+      approved: transactions.approved,
       createdAt: transactions.createdAt,
     })
     .from(transactions)

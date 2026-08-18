@@ -323,6 +323,44 @@ wires the PR 3 ledger engine into an endpoint. A few things worth recording:
   change via edit. Delete and recreate covers it; a dedicated "remove last split" affordance
   is a UI nicety, not a gap in the API.
 
+**Item 6 implemented in PR 5** — the budget screen: `GET/PUT
+/budgets/:id/months/:month` (`src/routes/months.ts`) is the one place in the app that
+calls the PR 3 ledger engine, and `BudgetMonth.tsx` is the UI on top of it. A few things
+worth recording:
+
+- **"Move money" and "cover overspending" are the same batch PUT, not separate
+  endpoints.** The client already has each category's current `assigned` from the last
+  GET, so a move is just two entries in one `PUT .../assignments` call — source's new
+  absolute value, destination's new absolute value — validated together and written
+  together (never half a batch). Covering overspending is the identical operation with
+  the negative-available category as the destination; the UI doesn't special-case it, per
+  the per-row "Move" affordance's own inline explanation.
+- **`assigned` is always an absolute new value for the month, never a delta** — both at
+  the API boundary and in the client's move-money math (`fromAssigned - amountMinor`,
+  `toAssigned + amountMinor`, computed from the last known-good server state, then sent
+  as two absolute values). This is what makes a batch idempotent and race-free against a
+  second stale write.
+- **A real UI staleness bug, caught by a real-browser smoke test, not just the API test
+  suite**: creating an account while already sitting on the Budget tab (the account form
+  lives inline in the nav sidebar, so the tab never unmounts) changed Ready to Assign —
+  new starting balance as income, or a new credit account's payment category — but
+  `BudgetMonth` had already fetched on mount and had no reason to fetch again. Fixed by
+  threading an `accountsVersion` counter down from `Budget.tsx`, bumped every time
+  accounts reload, as an explicit extra dependency on `BudgetMonth`'s fetch effect —
+  switching view tabs already remounts and refetches naturally; this covers the one path
+  that doesn't.
+- **Two test-authoring mistakes, not product bugs**, both caught immediately by the test
+  run rather than surviving to manual testing: `CategoryMonthResult` carries a
+  `categoryId` field that a hand-written `toEqual` expectation omitted; and a starting
+  balance's date defaults to *today* server-side, which silently broke a test asserting
+  against a fixed month once "today" and "the month under test" diverged — fixed by
+  passing `startingBalanceDate` explicitly rather than relying on the default.
+- Categories of `kind: 'income'` are rejected by `PUT .../assignments` (they feed Ready
+  to Assign directly from uncategorized transactions and have no "available" of their
+  own) — currently unreachable through any UI path since nothing creates one yet, but
+  asserted directly against the route by inserting one with raw SQL in the test, so the
+  defensive check is proven live rather than merely unreachable.
+
 ---
 
 ## Roadmap

@@ -93,3 +93,17 @@ export interface RegisterResponse {
   total: number;
   transactions: RegisterTransaction[];
 }
+
+// Mirrors src/domain/types.ts's CategoryMonthResult / MonthResult, as
+// returned by GET/PUT /budgets/:id/months/:month — see src/routes/months.ts.
+export interface CategoryMonthAmounts {
+  assigned: number;
+  activity: number;
+  available: number;
+}
+
+export interface MonthView {
+  month: string;
+  readyToAssign: number;
+  categories: Record<string, CategoryMonthAmounts>;
+}

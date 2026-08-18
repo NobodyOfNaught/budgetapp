@@ -235,6 +235,33 @@ refund reversing it; splits; transfers between on-budget accounts producing no c
 activity; transfers to tracking accounts; and a cross-currency transfer pair. These tests
 are the specification — write them alongside the engine, not after.
 
+**Implemented in PR 3** (`src/domain/ledger.ts` + `test/domain/ledger.test.ts`, 30 tests,
+all passing on the first run against hand-derived expected values). One rule the plan
+didn't fully spell out, worked out from first principles against the starting-balance
+requirement above: how **uncategorized** transactions route.
+
+- Uncategorized, on-budget, non-credit account, not a transfer → straight to Ready to
+  Assign (this is what makes a starting balance work with *no* special category: it's
+  just an uncategorized inflow dated at account creation).
+- Uncategorized, credit account, not a transfer → straight into that card's payment
+  category, **undoubled, unflipped** — treated exactly as if categorized directly to
+  Payment. This was the non-obvious part: applying the *purchase* doubling rule here (which
+  would give `+|amount|`) produces a **positive** available with nothing real behind it —
+  phantom spendable money for debt nobody assigned for. The correct behavior, matching
+  "negative available" above, is the direct/unflipped rule: `-$100` uncategorized reads as
+  `-$100` available, prompting the user to assign real money to cover it. Verified by hand
+  against concrete numbers before writing any code (see the commit message).
+- Uncategorized **transfer** legs (either account type) → zero effect, always. This is also
+  what stops a credit-card *payment* from double-counting: the card-side leg of a payment
+  transfer is an uncategorized transfer and lands here; only the checking-side leg
+  (categorized to Payment) drains the earmark.
+- Off-budget (tracking) account → zero effect, full stop, regardless of category.
+
+The split-parent exclusion (`activity(cat, month)` from the formula above) is verified by
+deliberately breaking it and confirming the "splits" test catches the regression — a parent
+left in would misread as a large negative "uncategorized income", not just a missing
+number.
+
 ---
 
 ## MVP scope

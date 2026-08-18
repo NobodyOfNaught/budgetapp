@@ -30,6 +30,17 @@
     }
   ],
 
+  // Per-IP throttle on the magic-link request endpoint (blunt scripted-abuse
+  // protection; the meaningful "don't spam this inbox" limit is our own
+  // cooldown against auth_tokens — see src/auth/rate-limit.ts). Cloudflare's
+  // native binding only offers 10s/60s windows, hence the two-layer design.
+  // namespace_id is a self-chosen identifier, not a resource that needs
+  // pre-provisioning — distinct per environment below so they don't share
+  // a bucket. Not inherited by named environments, so repeated per env.
+  "ratelimits": [
+    { "name": "AUTH_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }
+  ],
+
   "env": {
     // stg shares the PRODUCTION database on purpose (see plan: "Environments
     // & deployment" — stg proves app-only changes against real data). Its
@@ -49,6 +60,9 @@
           "database_name": "budgetapp-db",
           "database_id": "8929286f-b8c1-44c3-9579-0636ba5684ad"
         }
+      ],
+      "ratelimits": [
+        { "name": "AUTH_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
       ]
     },
 
@@ -69,6 +83,9 @@
           "database_id": "cb0e0695-661a-4a29-ac48-97bbaf12dbad",
           "migrations_dir": "migrations"
         }
+      ],
+      "ratelimits": [
+        { "name": "AUTH_RATE_LIMITER", "namespace_id": "1003", "simple": { "limit": 10, "period": 60 } }
       ]
     }
   }

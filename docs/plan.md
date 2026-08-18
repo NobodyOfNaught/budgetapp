@@ -428,20 +428,40 @@ Secrets (`EMAIL_FROM`, session signing key) are set per environment with `wrangl
 
 ## Auth flow detail
 
+*(Implemented in PR 2. Two details below were refined during implementation —
+noted inline — everything else shipped as planned.)*
+
 1. `POST /api/v1/auth/magic-link {email}` always returns 200 "check your email" — no
-   account enumeration. Rate limited per email and per IP via the Rate Limiting binding.
+   account enumeration (a malformed address is a 400, not an enumeration case: format
+   validation, not an existence check). Rate limited two ways, not one, because the
+   native Rate Limiting binding turned out to only offer 10s/60s windows — too short to
+   stop someone spamming a real inbox, only useful as a blunt per-IP abuse brake. So:
+   an IP check via the binding (10 req/60s) **and** a deterministic email-keyed cooldown
+   (max 5 tokens per email per 15 minutes, queried straight from `auth_tokens` —
+   `src/auth/rate-limit.ts`). Over either limit: skip creating a token/sending mail, but
+   respond identically — no signal either way.
 2. Generate a 32-byte random token; store only its SHA-256 hash, 15-minute expiry,
-   single use. Set a short-lived `challenge` cookie bound to that token row.
-3. Email sent through `env.EMAIL.send()`. Note Cloudflare Email Service is in public beta;
-   sending to arbitrary recipients requires Workers Paid (available on this account), with
-   3,000 emails/month included and domain verification required. The `EmailSender`
-   interface keeps a vendor swap to one file, and gives dev a console-logging
-   implementation so local sign-in needs no email at all.
+   single use (claimed atomically — an `UPDATE ... WHERE consumed_at IS NULL`, so a
+   double-submit can't sign in twice from one token). Set a short-lived `challenge`
+   cookie bound to that token row.
+3. Email sent through an `EmailSender` interface (`src/lib/email.ts`). **Only a
+   console-logging implementation is wired up in PR 2** — real delivery (Cloudflare
+   Email Service or otherwise) is deliberately deferred: this account has no verified
+   sending domain yet, and the interface exists precisely so plugging in a real
+   provider later is a one-file change plus one line where it's constructed, not a
+   rewrite of the auth routes. Sign in during review by reading the confirm URL out of
+   the Worker's logs (`wrangler tail`, or Live Logs in the dashboard).
 4. The link opens a page that **POSTs** to consume the token — a GET would let corporate
    link scanners burn it. Matching `challenge` cookie signs in immediately; a different
-   device shows a "Confirm sign-in" button.
+   device (cookie missing/mismatched) returns `needs_confirmation` and leaves the token
+   **unclaimed**, so the client's "Confirm sign-in" button can retry with `confirm: true`
+   — possessing the emailed token is itself sufficient proof; the cookie only decides
+   whether that extra click is needed.
 5. Session row created; `__Host-session` cookie, `HttpOnly; Secure; SameSite=Lax`, 30-day
-   sliding expiry. CSRF covered by SameSite plus an `Origin` check on every mutation.
+   sliding expiry (re-extended at most once per day of activity, not on every request —
+   full re-extension on every hit would mean a D1 write per authenticated request).
+   CSRF covered by SameSite plus an `Origin` check on every mutation
+   (`src/lib/csrf.ts`).
 
 ---
 

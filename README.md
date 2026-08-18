@@ -58,6 +58,20 @@ npm run build    # vite build → web/dist, ready for `wrangler deploy`
 `@cloudflare/vitest-pool-workers`) against a real D1 instance, migrated with
 `migrations/*.sql` — not a mock.
 
+### Signing in (local dev / review)
+
+Magic-link email isn't wired to a real provider yet — see
+[`docs/plan.md`](docs/plan.md#auth-flow-detail) for why that's deliberate.
+`POST /api/v1/auth/magic-link` logs the sign-in link instead of emailing it:
+
+```sh
+npm run dev
+# then, in another terminal, watch for the "[auth] magic link for ..." line:
+npx wrangler tail          # or the deployed Worker's Live Logs in the dashboard
+```
+
+Request a link from the app, copy the logged URL, open it in a browser.
+
 ### Regenerating types
 
 `Env` and the runtime types (`Request`, `D1Database`, `ExecutionContext`, …)
@@ -131,7 +145,10 @@ A red build now blocks the merge instead of just being visible.
 
 ## Secrets
 
-None are needed yet (auth ships in a later PR). When they are:
+None are needed yet — auth is live (magic-link sign-in, sessions, a
+`budget_members`-gated `/api/v1/budgets/:id`) but email sending is a
+console-logging stand-in, not a real provider; see "Signing in" above. A
+real `EmailSender` will need something like this:
 
 ```sh
 npx wrangler secret put EMAIL_FROM --env uat

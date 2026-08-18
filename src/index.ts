@@ -1,11 +1,32 @@
 import { Hono } from 'hono';
+import { sameOriginOnly } from './lib/csrf';
+import { ConsoleEmailSender, type EmailSender } from './lib/email';
+import { createAuthRoutes } from './routes/auth';
+import { budgetsRoute } from './routes/budgets';
 import { health } from './routes/health';
+import type { AppEnv } from './types/hono';
 
-const app = new Hono<{ Bindings: Env }>();
+/**
+ * Builds the app with its dependencies (currently just the email sender)
+ * injected rather than hardcoded, so tests can swap in a capturing
+ * implementation and observe a magic-link token — which is otherwise never
+ * persisted anywhere in the clear, only hashed. See src/routes/auth.ts.
+ */
+export function createApp(emailSender: EmailSender = new ConsoleEmailSender()): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
 
-app.route('/api/v1/health', health);
+  app.use('/api/*', sameOriginOnly);
 
-app.notFound((c) => c.json({ error: 'not_found' }, 404));
+  app.route('/api/v1/health', health);
+  app.route('/api/v1/auth', createAuthRoutes(emailSender));
+  app.route('/api/v1/budgets', budgetsRoute);
+
+  app.notFound((c) => c.json({ error: 'not_found' }, 404));
+
+  return app;
+}
+
+const app = createApp();
 
 export default {
   async fetch(request, env, ctx) {

@@ -66,22 +66,22 @@ npm run build    # vite build → web/dist, ready for `wrangler deploy`
 
 ### Signing in (local dev / review)
 
-Local `npm run dev` and every deployed environment except `budgetapp-uat` still log the
-sign-in link instead of emailing it — see
-[`docs/plan.md`](docs/plan.md#auth-flow-detail) for why (`stg`/`main` haven't had a
-sending domain/from-address decided yet):
+All three deployed Workers (`budgetapp`, `budgetapp-stg`, `budgetapp-uat`) send real
+magic-link mail via Cloudflare Email Service — see
+[`docs/plan.md`](docs/plan.md#auth-flow-detail) for the full story. Request a link
+there with a real address and check your inbox (from `noreply@budget.naught.ca`,
+`noreply@budget-stg.naught.ca`, and `noreply@budget-uat.naught.ca` respectively).
+
+Local `npm run dev` still doesn't send anywhere real — there's no `remote: true` on
+the binding, so it only hits Miniflare's local simulation, which prints a
+From/To/Subject block plus file paths holding the text/HTML bodies (the confirm URL is
+inside those files) rather than a plain link:
 
 ```sh
 npm run dev
-# then, in another terminal, watch for the "[auth] magic link for ..." line:
+# then, in another terminal, watch the send_email simulation log, or:
 npx wrangler tail          # or the deployed Worker's Live Logs in the dashboard
 ```
-
-Request a link from the app, copy the logged URL, open it in a browser.
-
-`budgetapp-uat` sends real mail via Cloudflare Email Service, from
-`noreply@budget-uat.naught.ca` — request a link there with a real address and check your
-inbox instead.
 
 ### Regenerating types
 
@@ -159,20 +159,24 @@ A red build now blocks the merge instead of just being visible.
 
 ## Secrets
 
-None are needed. `budgetapp-uat` sends real magic-link email via Cloudflare Email
-Service (`send_email` binding), but its `EMAIL_FROM` address is a plain `var` in
+None are needed. Every environment sends real magic-link email via Cloudflare Email
+Service (`send_email` binding), but each `EMAIL_FROM` address is a plain `var` in
 `wrangler.jsonc`, not a secret — it isn't sensitive, and a committed var is reviewable,
-the same treatment `ENVIRONMENT` gets. `stg`/`main` don't have the binding yet; see
-"Signing in" above and [`docs/plan.md`](docs/plan.md#auth-flow-detail) for why.
+the same treatment `ENVIRONMENT` gets. See "Signing in" above and
+[`docs/plan.md`](docs/plan.md#auth-flow-detail) for the full story.
 
-Onboarding a new sending domain (a one-time step, not per-deploy) needs a Cloudflare API
-token with the **Zone → Email Sending → Edit** permission, which the standard
-D1/Workers-management token this project otherwise uses doesn't have by default:
+Onboarding a new sending domain (a one-time step per domain, not per-deploy) needs a
+Cloudflare API token with the **Account → Email Sending → Edit** permission, which the
+standard D1/Workers-management token this project otherwise uses doesn't have by
+default:
 
 ```sh
-npx wrangler email sending enable <domain>       # e.g. budget-uat.naught.ca
+npx wrangler email sending enable <domain>       # e.g. budget-stg.naught.ca
 npx wrangler email sending dns get <domain>      # confirm the SPF/DKIM/DMARC records landed
 ```
+
+(The three sending domains already onboarded: `budget.naught.ca`,
+`budget-stg.naught.ca`, `budget-uat.naught.ca`.)
 
 ## Project plan
 

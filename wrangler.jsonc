@@ -15,8 +15,12 @@
     "not_found_handling": "single-page-application"
   },
 
+  // EMAIL_FROM is a plain var, not a `wrangler secret put` value — it's not
+  // sensitive, and a committed var is reviewable, same treatment as
+  // ENVIRONMENT. See docs/plan.md's PR 11 notes.
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "EMAIL_FROM": "noreply@budget.naught.ca"
   },
 
   // Production. Bound as `DB`. Migrations applied on every `main` deploy —
@@ -29,6 +33,16 @@
       "migrations_dir": "migrations"
     }
   ],
+
+  // Cloudflare Email Service (public beta) — real magic-link delivery for
+  // arbitrary recipients, gated on the account's paid Workers plan. Not
+  // the older Email Routing send_email binding, which only reaches
+  // pre-verified destination addresses and can't do this job — see
+  // docs/plan.md's PR 11 notes. No `remote: true`: local `wrangler dev`
+  // and tests hit Miniflare's local simulation, never the real API — only
+  // a real `wrangler deploy` does. Repeated (with a different EMAIL_FROM)
+  // in env.stg and env.uat below, same reasoning throughout.
+  "send_email": [{ "name": "EMAIL" }],
 
   // Per-IP throttle on the magic-link request endpoint (blunt scripted-abuse
   // protection; the meaningful "don't spam this inbox" limit is our own
@@ -48,7 +62,7 @@
     // instead of applying migrations, and never runs migrations here.
     "stg": {
       "name": "budgetapp-stg",
-      "vars": { "ENVIRONMENT": "staging" },
+      "vars": { "ENVIRONMENT": "staging", "EMAIL_FROM": "noreply@budget-stg.naught.ca" },
       "assets": {
         "directory": "./web/dist",
         "binding": "ASSETS",
@@ -73,18 +87,14 @@
       ],
       "ratelimits": [
         { "name": "AUTH_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } }
-      ]
+      ],
+      "send_email": [{ "name": "EMAIL" }]
     },
 
     // uat gets its OWN database, so schema changes get a real rehearsal
     // before they ever touch prod data (via stg) or prod itself (via main).
     "uat": {
       "name": "budgetapp-uat",
-      // EMAIL_FROM is a plain var, not a `wrangler secret put` value (see
-      // README's old "Secrets" note) — it's not sensitive, and a committed
-      // var is reviewable, same treatment as ENVIRONMENT above. uat only,
-      // for now — see docs/plan.md's PR 11 notes on why stg/main are
-      // untouched (their own sending domain/from-address isn't decided).
       "vars": { "ENVIRONMENT": "uat", "EMAIL_FROM": "noreply@budget-uat.naught.ca" },
       "assets": {
         "directory": "./web/dist",
@@ -102,13 +112,7 @@
       "ratelimits": [
         { "name": "AUTH_RATE_LIMITER", "namespace_id": "1003", "simple": { "limit": 10, "period": 60 } }
       ],
-      // Cloudflare Email Service (public beta) — real magic-link delivery
-      // for arbitrary recipients, gated on the account's paid Workers plan.
-      // Not the older Email Routing send_email binding, which only reaches
-      // pre-verified destination addresses and can't do this job — see
-      // docs/plan.md's PR 11 notes. No `remote: true`: tests and
-      // `wrangler dev --env uat` should hit Miniflare's local simulation,
-      // never the real API — only a real `wrangler deploy --env uat` does.
+      // See the top-level send_email comment above.
       "send_email": [{ "name": "EMAIL" }]
     }
   }

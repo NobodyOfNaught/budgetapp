@@ -873,10 +873,10 @@ noted inline — everything else shipped as planned.)*
    the account had no verified sending domain yet, and the interface exists precisely
    so plugging in a real provider later is a one-file change plus one line where it's
    constructed, not a rewrite of the auth routes. **PR 11 landed that real provider,
-   for `uat` only** — see below.
+   live in all three environments** — see below.
 
-   **Real delivery via Cloudflare Email Service, `uat` only (PR 11).** The account now
-   has a paid Workers plan and a custom domain (`budget-uat.naught.ca`) pointed at the
+   **Real delivery via Cloudflare Email Service (PR 11).** The account now has a paid
+   Workers plan and a custom domain (`budget-uat.naught.ca`) pointed at the
    `budgetapp-uat` Worker, so this was picked up. One correction along the way: the
    first instinct was Cloudflare's `send_email` binding as part of **Email Routing** —
    wrong tool, because that one only delivers to addresses pre-verified as a
@@ -891,31 +891,46 @@ noted inline — everything else shipped as planned.)*
 
    `CloudflareEmailSender` (`src/lib/email.ts`) is the new default in `src/index.ts`,
    replacing `ConsoleEmailSender` — safely, because it self-degrades to
-   `ConsoleEmailSender` whenever `env.EMAIL`/`env.EMAIL_FROM` aren't both present, which
-   is everywhere except `wrangler.jsonc`'s `env.uat` block today. Local `wrangler dev`
-   (unscoped, top-level config) and `stg`/`main` are therefore completely unchanged;
-   only the deployed `budgetapp-uat` Worker sends real mail, from
-   `noreply@budget-uat.naught.ca`. `EMAIL_FROM` is a plain `var`, not a
-   `wrangler secret put` value as originally anticipated below — it isn't sensitive,
-   and a committed var is reviewable, the same treatment `ENVIRONMENT` already gets.
-   Send failures are logged and swallowed, never thrown — `/magic-link`'s "always 200,
-   identical response" anti-enumeration invariant must survive a provider hiccup.
+   `ConsoleEmailSender` whenever `env.EMAIL`/`env.EMAIL_FROM` aren't both present.
+   Landed in two steps:
 
-   One type-safety wrinkle worth recording: every binding until now (`DB`,
-   `AUTH_RATE_LIMITER`, `ASSETS`, `ENVIRONMENT`) was declared identically across all
-   three `wrangler.jsonc` environments, so the app never had to type a binding that
-   exists on only one of them. The ambient global `Env` type `wrangler types` generates
-   mirrors the **top-level** config only (`Cloudflare.UatEnv` is a separate,
-   unused-by-app-code shape) — so `EMAIL`/`EMAIL_FROM` are hand-added as *optional*
-   fields on `AppEnv['Bindings']` in `src/types/hono.ts` rather than left to codegen,
-   which is also the more honest type: a Worker deployed from any other block genuinely
-   won't have them at runtime. `EmailSender.sendMagicLink` gained a second parameter,
-   `env: AppEnv['Bindings']`, threaded from `c.env` at the one call site in
-   `src/routes/auth.ts` — necessary because the binding is only knowable per-request,
-   not when `createApp()` builds the app once at module scope.
+   - **First, `uat` only**, verified end to end (a real magic-link email requested
+     against the deployed `budgetapp-uat` Worker and confirmed received) before
+     touching `stg`/`main`, per this file's deploy-gate discipline. `EMAIL_FROM` is a
+     plain `var`, not a `wrangler secret put` value as originally anticipated below —
+     it isn't sensitive, and a committed var is reviewable, the same treatment
+     `ENVIRONMENT` already gets.
+   - **Then extended to `stg` and `main`** — `noreply@budget-stg.naught.ca` and
+     `noreply@budget.naught.ca` respectively, both onboarded with Cloudflare Email
+     Service the same way. All three environments now send real mail; local
+     `wrangler dev` (unscoped, top-level config) does too, but only against
+     Miniflare's local simulation — no `remote: true` anywhere, so nothing outside an
+     actual `wrangler deploy` ever calls the real API. One workflow side effect worth
+     knowing: local dev's magic-link sign-in no longer prints the plain
+     `[auth] magic link for ...: <url>` line — Miniflare's own send_email simulation
+     log takes over instead, giving From/To/Subject plus file paths holding the
+     text/HTML bodies (the confirm URL is inside those files) rather than the link
+     inline. Still fully offline, just one extra step to read.
 
-   `stg`/`main` real email is a deliberate non-goal of PR 11 — their own sending
-   domain/from-address hasn't been decided.
+   Send failures are logged and swallowed, never thrown, everywhere — `/magic-link`'s
+   "always 200, identical response" anti-enumeration invariant must survive a provider
+   hiccup.
+
+   One type-safety wrinkle from the `uat`-only step, resolved once `stg`/`main` caught
+   up: every binding until then (`DB`, `AUTH_RATE_LIMITER`, `ASSETS`, `ENVIRONMENT`)
+   was declared identically across all three `wrangler.jsonc` environments, so the app
+   never had to type a binding that existed on only one of them. The ambient global
+   `Env` type `wrangler types` generates mirrors the **top-level** config only
+   (`Cloudflare.UatEnv` was a separate, unused-by-app-code shape) — so while `EMAIL`
+   was `uat`-only, `EMAIL`/`EMAIL_FROM` had to be hand-added as *optional* fields on
+   `AppEnv['Bindings']` in `src/types/hono.ts` rather than left to codegen. Once the
+   binding+var were added to the top-level and `env.stg` blocks too, regenerating
+   picked them up as required fields on the real ambient `Env` — the hand-augmentation
+   in `hono.ts` was removed, back to plain `Bindings: Env`. `EmailSender.sendMagicLink`
+   keeps its second parameter, `env: AppEnv['Bindings']`, threaded from `c.env` at the
+   one call site in `src/routes/auth.ts` — still necessary regardless of how many
+   environments have the binding, since it's only knowable per-request, not when
+   `createApp()` builds the app once at module scope.
 4. The link opens a page that **POSTs** to consume the token — a GET would let corporate
    link scanners burn it. Matching `challenge` cookie signs in immediately; a different
    device (cookie missing/mismatched) returns `needs_confirmation` and leaves the token

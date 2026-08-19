@@ -66,9 +66,10 @@ npm run build    # vite build → web/dist, ready for `wrangler deploy`
 
 ### Signing in (local dev / review)
 
-Magic-link email isn't wired to a real provider yet — see
-[`docs/plan.md`](docs/plan.md#auth-flow-detail) for why that's deliberate.
-`POST /api/v1/auth/magic-link` logs the sign-in link instead of emailing it:
+Local `npm run dev` and every deployed environment except `budgetapp-uat` still log the
+sign-in link instead of emailing it — see
+[`docs/plan.md`](docs/plan.md#auth-flow-detail) for why (`stg`/`main` haven't had a
+sending domain/from-address decided yet):
 
 ```sh
 npm run dev
@@ -77,6 +78,10 @@ npx wrangler tail          # or the deployed Worker's Live Logs in the dashboard
 ```
 
 Request a link from the app, copy the logged URL, open it in a browser.
+
+`budgetapp-uat` sends real mail via Cloudflare Email Service, from
+`noreply@budget-uat.naught.ca` — request a link there with a real address and check your
+inbox instead.
 
 ### Regenerating types
 
@@ -154,18 +159,20 @@ A red build now blocks the merge instead of just being visible.
 
 ## Secrets
 
-None are needed yet — auth is live (magic-link sign-in, sessions, a
-`budget_members`-gated `/api/v1/budgets/:id`) but email sending is a
-console-logging stand-in, not a real provider; see "Signing in" above. A
-real `EmailSender` will need something like this:
+None are needed. `budgetapp-uat` sends real magic-link email via Cloudflare Email
+Service (`send_email` binding), but its `EMAIL_FROM` address is a plain `var` in
+`wrangler.jsonc`, not a secret — it isn't sensitive, and a committed var is reviewable,
+the same treatment `ENVIRONMENT` gets. `stg`/`main` don't have the binding yet; see
+"Signing in" above and [`docs/plan.md`](docs/plan.md#auth-flow-detail) for why.
+
+Onboarding a new sending domain (a one-time step, not per-deploy) needs a Cloudflare API
+token with the **Zone → Email Sending → Edit** permission, which the standard
+D1/Workers-management token this project otherwise uses doesn't have by default:
 
 ```sh
-npx wrangler secret put EMAIL_FROM --env uat
-npx wrangler secret put EMAIL_FROM --env stg
-npx wrangler secret put EMAIL_FROM               # production (top-level env)
+npx wrangler email sending enable <domain>       # e.g. budget-uat.naught.ca
+npx wrangler email sending dns get <domain>      # confirm the SPF/DKIM/DMARC records landed
 ```
-
-Set per environment, never committed.
 
 ## Project plan
 

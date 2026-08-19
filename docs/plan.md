@@ -868,13 +868,54 @@ noted inline — everything else shipped as planned.)*
    single use (claimed atomically — an `UPDATE ... WHERE consumed_at IS NULL`, so a
    double-submit can't sign in twice from one token). Set a short-lived `challenge`
    cookie bound to that token row.
-3. Email sent through an `EmailSender` interface (`src/lib/email.ts`). **Only a
-   console-logging implementation is wired up in PR 2** — real delivery (Cloudflare
-   Email Service or otherwise) is deliberately deferred: this account has no verified
-   sending domain yet, and the interface exists precisely so plugging in a real
-   provider later is a one-file change plus one line where it's constructed, not a
-   rewrite of the auth routes. Sign in during review by reading the confirm URL out of
-   the Worker's logs (`wrangler tail`, or Live Logs in the dashboard).
+3. Email sent through an `EmailSender` interface (`src/lib/email.ts`). **PR 2 wired up
+   only a console-logging implementation** — real delivery was deliberately deferred:
+   the account had no verified sending domain yet, and the interface exists precisely
+   so plugging in a real provider later is a one-file change plus one line where it's
+   constructed, not a rewrite of the auth routes. **PR 11 landed that real provider,
+   for `uat` only** — see below.
+
+   **Real delivery via Cloudflare Email Service, `uat` only (PR 11).** The account now
+   has a paid Workers plan and a custom domain (`budget-uat.naught.ca`) pointed at the
+   `budgetapp-uat` Worker, so this was picked up. One correction along the way: the
+   first instinct was Cloudflare's `send_email` binding as part of **Email Routing** —
+   wrong tool, because that one only delivers to addresses pre-verified as a
+   "destination address" in the dashboard, which can't work for arbitrary sign-up
+   emails. The actual fit is **Cloudflare Email Service** (public beta, launched April
+   2026, billed against the Workers Paid plan — 3,000 free sends/month, then
+   $0.35/1000) — a genuine transactional sender for arbitrary recipients once a sending
+   domain is onboarded (`wrangler email sending enable <domain>`). It happens to reuse
+   the exact same `send_email` binding name/shape and `cloudflare:email`
+   `EmailMessage`/`env.EMAIL.send()` API as Email Routing's binding, which is what made
+   the first, wrong guess plausible.
+
+   `CloudflareEmailSender` (`src/lib/email.ts`) is the new default in `src/index.ts`,
+   replacing `ConsoleEmailSender` — safely, because it self-degrades to
+   `ConsoleEmailSender` whenever `env.EMAIL`/`env.EMAIL_FROM` aren't both present, which
+   is everywhere except `wrangler.jsonc`'s `env.uat` block today. Local `wrangler dev`
+   (unscoped, top-level config) and `stg`/`main` are therefore completely unchanged;
+   only the deployed `budgetapp-uat` Worker sends real mail, from
+   `noreply@budget-uat.naught.ca`. `EMAIL_FROM` is a plain `var`, not a
+   `wrangler secret put` value as originally anticipated below — it isn't sensitive,
+   and a committed var is reviewable, the same treatment `ENVIRONMENT` already gets.
+   Send failures are logged and swallowed, never thrown — `/magic-link`'s "always 200,
+   identical response" anti-enumeration invariant must survive a provider hiccup.
+
+   One type-safety wrinkle worth recording: every binding until now (`DB`,
+   `AUTH_RATE_LIMITER`, `ASSETS`, `ENVIRONMENT`) was declared identically across all
+   three `wrangler.jsonc` environments, so the app never had to type a binding that
+   exists on only one of them. The ambient global `Env` type `wrangler types` generates
+   mirrors the **top-level** config only (`Cloudflare.UatEnv` is a separate,
+   unused-by-app-code shape) — so `EMAIL`/`EMAIL_FROM` are hand-added as *optional*
+   fields on `AppEnv['Bindings']` in `src/types/hono.ts` rather than left to codegen,
+   which is also the more honest type: a Worker deployed from any other block genuinely
+   won't have them at runtime. `EmailSender.sendMagicLink` gained a second parameter,
+   `env: AppEnv['Bindings']`, threaded from `c.env` at the one call site in
+   `src/routes/auth.ts` — necessary because the binding is only knowable per-request,
+   not when `createApp()` builds the app once at module scope.
+
+   `stg`/`main` real email is a deliberate non-goal of PR 11 — their own sending
+   domain/from-address hasn't been decided.
 4. The link opens a page that **POSTs** to consume the token — a GET would let corporate
    link scanners burn it. Matching `challenge` cookie signs in immediately; a different
    device (cookie missing/mismatched) returns `needs_confirmation` and leaves the token

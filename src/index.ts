@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { sameOriginOnly } from './lib/csrf';
-import { ConsoleEmailSender, type EmailSender } from './lib/email';
+import { CloudflareEmailSender, type EmailSender } from './lib/email';
 import { createAuthRoutes } from './routes/auth';
 import { budgetsRoute } from './routes/budgets';
 import { health } from './routes/health';
@@ -11,8 +11,13 @@ import type { AppEnv } from './types/hono';
  * injected rather than hardcoded, so tests can swap in a capturing
  * implementation and observe a magic-link token — which is otherwise never
  * persisted anywhere in the clear, only hashed. See src/routes/auth.ts.
+ *
+ * CloudflareEmailSender is a safe universal default across every
+ * environment: it only sends for real where wrangler.jsonc actually binds
+ * EMAIL/EMAIL_FROM (env.uat today), and falls back to console-logging
+ * everywhere else — see src/lib/email.ts.
  */
-export function createApp(emailSender: EmailSender = new ConsoleEmailSender()): Hono<AppEnv> {
+export function createApp(emailSender: EmailSender = new CloudflareEmailSender()): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
   app.use('/api/*', sameOriginOnly);

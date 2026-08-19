@@ -52,7 +52,7 @@ export function createAuthRoutes(emailSender: EmailSender): Hono<AppEnv> {
       });
 
       const confirmUrl = `${new URL(c.req.url).origin}/auth/confirm?token=${encodeURIComponent(token)}`;
-      await emailSender.sendMagicLink({ to: email, confirmUrl });
+      await emailSender.sendMagicLink({ to: email, confirmUrl }, c.env);
 
       setCookie(c, CHALLENGE_COOKIE, challenge, {
         httpOnly: true,

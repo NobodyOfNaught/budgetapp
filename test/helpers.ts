@@ -9,6 +9,8 @@ export const ORIGIN = 'http://example.com';
 export class CapturingEmailSender implements EmailSender {
   sent: MagicLinkEmail[] = [];
   async sendMagicLink(email: MagicLinkEmail): Promise<void> {
+    // env deliberately ignored — tests observe the token via `sent`, not
+    // real delivery. See CloudflareEmailSender for the real implementation.
     this.sent.push(email);
   }
 }

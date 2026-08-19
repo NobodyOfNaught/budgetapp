@@ -99,7 +99,7 @@ export function computeLedger(input: LedgerInput): LedgerResult {
     }
 
     readyToAssign = readyToAssign + incomeThisMonth - totalAssigned - cashOverspendingRealized;
-    results.push({ month, readyToAssign, categories });
+    results.push({ month, readyToAssign, incomeThisMonth, categories });
   }
 
   return { months: results };

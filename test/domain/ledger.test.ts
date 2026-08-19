@@ -80,6 +80,8 @@ describe('rollover of positive balances', () => {
     expect(result.months.map((m) => m.month)).toEqual([M1, M2]);
     expect(result.months[0]?.categories.groceries?.available).toBe(10000);
     expect(result.months[0]?.readyToAssign).toBe(40000); // 50000 income - 10000 assigned
+    expect(result.months[0]?.incomeThisMonth).toBe(50000);
+    expect(result.months[1]?.incomeThisMonth).toBe(0); // nothing happened in month 2
     // Nothing happens in month 2: available and RTA both carry forward untouched.
     expect(result.months[1]?.categories.groceries?.available).toBe(10000);
     expect(result.months[1]?.readyToAssign).toBe(40000);
@@ -281,6 +283,7 @@ describe('transfers', () => {
 
     expect(result.months[0]?.categories.groceries?.activity).toBe(0);
     expect(result.months[0]?.readyToAssign).toBe(-5000);
+    expect(result.months[0]?.incomeThisMonth).toBe(-5000); // negative — money LEFT the budget
   });
 
   it('a transfer IN from a tracking account is new money to assign', () => {
@@ -303,6 +306,7 @@ describe('transfers', () => {
 
     expect(result.months[0]?.categories.groceries?.activity).toBe(0);
     expect(result.months[0]?.readyToAssign).toBe(5000);
+    expect(result.months[0]?.incomeThisMonth).toBe(5000);
   });
 
   it('a transfer whose counterpart account is unknown is a no-op, not invented income', () => {
@@ -367,6 +371,7 @@ describe('starting balances', () => {
     });
     expect(result.months[0]?.categories.payment?.available).toBe(-10000);
     expect(result.months[0]?.readyToAssign).toBe(0); // must NOT leak into RTA
+    expect(result.months[0]?.incomeThisMonth).toBe(0);
   });
 });
 
@@ -379,6 +384,6 @@ describe('edge cases', () => {
       transactions: [],
       throughMonth: M3,
     });
-    expect(result.months).toEqual([{ month: M3, readyToAssign: 0, categories: {} }]);
+    expect(result.months).toEqual([{ month: M3, readyToAssign: 0, incomeThisMonth: 0, categories: {} }]);
   });
 });

@@ -81,7 +81,12 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
     throughMonth: month,
   });
 
-  const monthResult: MonthResult = result.months[result.months.length - 1] ?? { month, readyToAssign: 0, categories: {} };
+  const monthResult: MonthResult = result.months[result.months.length - 1] ?? {
+    month,
+    readyToAssign: 0,
+    incomeThisMonth: 0,
+    categories: {},
+  };
   const targets = computeTargets({
     targets: targetRows,
     monthCategories: monthResult.categories,

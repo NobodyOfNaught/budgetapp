@@ -74,6 +74,14 @@ export interface MonthResult {
   month: string;
   /** Running Ready to Assign balance as of the end of this month. */
   readyToAssign: number;
+  /** Net money entering the budget this month — income-categorized rows,
+   * uncategorized inflow/outflow on ordinary on-budget accounts, and
+   * transfers crossing the on-budget/off-budget boundary. Computed
+   * internally to fold into readyToAssign; exposed here too because it's
+   * exactly what an income-vs-expense report needs (see src/routes/reports.ts) —
+   * reusing this rather than a second computation of "which rows count as
+   * income" is the whole point of exposing it. */
+  incomeThisMonth: number;
   categories: Record<string, CategoryMonthResult>;
 }
 

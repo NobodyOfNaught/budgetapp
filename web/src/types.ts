@@ -177,3 +177,23 @@ export interface ReviewTransaction {
   importPayeeRaw: string | null;
   transferAccountId: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Reports — mirrors src/routes/reports.ts. Category/group names aren't sent
+// by these endpoints (the client already has them via categoryGroups, same
+// pattern as Register.tsx's categoryNameById), so responses carry ids only.
+// ---------------------------------------------------------------------------
+
+export interface SpendingReport {
+  start: string;
+  end: string;
+  categories: { categoryId: string; spentMinor: number }[];
+}
+
+export interface IncomeExpenseReport {
+  months: { month: string; incomeMinor: number; expenseMinor: number }[];
+}
+
+export interface NetWorthReport {
+  months: { month: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
+}

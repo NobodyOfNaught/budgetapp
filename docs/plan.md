@@ -525,13 +525,42 @@ done — see the roadmap. What the file itself forced:
   Entertainment→Fun Money, Bills→Utilities). Vague labels — General, Money added, Personal
   care — are deliberately left blank rather than guessed at.
 
+**Reports landed in PR 8** (`src/domain/reports.ts`, `src/routes/reports.ts`,
+`web/src/components/Reports.tsx`) — the three named in Phase 2's roadmap line: spending by
+category, income vs. expense, net worth, all over a shared start/end month range. No schema
+change; every number comes straight out of `transactions`/`categories`/`accounts`.
+
+- **Reuse over reinvention, deliberately.** Spending-by-category and income-vs-expense are
+  thin route-layer aggregations over `computeLedger`'s own per-month output
+  (`src/domain/ledger.ts`), not a second implementation of "which rows count as spending or
+  income" — that's real risk of the two readings drifting, which is exactly what happened
+  once already (the PR 7 transfer-boundary bug). The one piece `computeLedger` folded
+  internally but never returned — `incomeThisMonth` — is now exposed on `MonthResult`
+  (purely additive) instead of being thrown away after updating Ready to Assign.
+- **Net worth is different in kind and gets its own small fold.** Unlike category activity,
+  an account balance carries no carryover/assignment logic — the plan's own domain-types
+  comment already says a single point-in-time balance is "simple enough to do with SQL
+  directly" and doesn't belong in the ledger module. But a *trend* across many months is
+  still a fold (each snapshot depends on every row before it), so `netWorthTrend`
+  (`src/domain/reports.ts`) is one small pure function, golden-tested the same way as
+  `computeLedger`/`computeTargets`, walking a sorted transaction list once and snapshotting
+  a running per-account balance at each requested month's end. Liability classification
+  (`credit_card`, `line_of_credit`, `tracking_liability`) reuses the ledger's own
+  `CREDIT_ACCOUNT_KINDS` plus one addition.
+- **No charting dependency introduced.** This repo has none today, and every existing
+  screen (`Register`, `BudgetMonth`, `UpcomingPanel`) is a plain HTML table with the same
+  duplicated `formatMinor`/`amountColor` idiom — `Reports.tsx` stays consistent rather than
+  being the first screen to pull one in for a single feature.
+- No schema change means this is another app-only promotion — feature → `uat` → `stg` →
+  `main` — like PR 6 and the PR 6 polish pass.
+
 ---
 
 ## Roadmap
 
 **Phase 2 — Make it a budgeting tool, not a ledger.** ~~Category targets/goals (monthly,
-by-date, refill vs. build).~~ **Landed in PR 6** — see below. Reports: spending by
-category, income vs. expense, net worth. Scheduled/recurring transactions
+by-date, refill vs. build).~~ **Landed in PR 6.** ~~Reports: spending by category, income
+vs. expense, net worth.~~ **Landed in PR 8** — see above. Scheduled/recurring transactions
 (`scheduled_transactions` table; `transactions.scheduled_transaction_id` already exists).
 Full reconciliation with adjustment transactions.
 

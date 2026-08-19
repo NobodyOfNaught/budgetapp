@@ -55,6 +55,7 @@ export async function callJson<T>(
 const TABLES_CHILDREN_FIRST = [
   'transactions',
   'import_batches',
+  'payee_rules',
   'category_months',
   'category_targets',
   'categories',

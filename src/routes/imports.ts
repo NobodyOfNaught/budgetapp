@@ -2,14 +2,38 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
+import { loadActivePayeeRules } from '../budget/payee-rules';
 import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
 import { insertTransaction, insertTransferPair } from '../budget/transactions';
 import { getDb, type Db } from '../db/client';
 import { accounts, budgets, categories, importBatches, payees, transactions } from '../db/schema';
 import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName, type ImportProvider } from '../import';
+import { cleanPayeeName } from '../import/payee-name';
+import { matchPayeeRule, type PayeeRule } from '../import/rules';
 import { ulid } from '../lib/ids';
 import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
+
+/**
+ * The final payee name + category for one imported row, applying the
+ * layering described in docs/plan.md's PR 9 notes: a matching payee_rule
+ * wins outright (matched against the FULL raw description, never a cleaned
+ * name); otherwise the generic cleanPayeeName heuristic runs over the
+ * provider's own best-effort name (or the raw text, if the provider has
+ * none). Shared by every provider — this is what makes rules and the
+ * heuristic apply to Wise imports exactly as they do to BECU's.
+ */
+function resolveImportPayee(
+  rules: PayeeRule[],
+  row: { payeeRaw: string | null; payeeName: string | null },
+): { payeeName: string | null; ruleCategoryId: string | null } {
+  const rawText = row.payeeRaw ?? '';
+  const match = rawText !== '' ? matchPayeeRule(rules, rawText) : null;
+  if (match) return { payeeName: match.payeeName, ruleCategoryId: match.categoryId };
+
+  const bestEffort = row.payeeName ?? row.payeeRaw;
+  return { payeeName: bestEffort ? cleanPayeeName(bestEffort) : null, ruleCategoryId: null };
+}
 
 // Statement files are small (a year of card activity is a few hundred rows,
 // well under 100KB) so the CSV arrives as a plain JSON string field and is
@@ -231,6 +255,11 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
       .map((r) => `${r.accountId}:${r.importId}`),
   );
 
+  // Rules and the generic naming heuristic apply to every provider, not
+  // just the one that motivated them — see docs/plan.md's PR 9 notes and
+  // resolveImportPayee above.
+  const rules = await loadActivePayeeRules(db, budgetId);
+
   let imported = 0;
   let duplicates = 0;
 
@@ -243,9 +272,14 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
         continue;
       }
 
-      const payeeId = row.payeeRaw ? await getOrCreatePayee(db, budgetId, row.payeeRaw, now) : null;
+      const resolved = resolveImportPayee(rules, row);
+      const payeeId = resolved.payeeName ? await getOrCreatePayee(db, budgetId, resolved.payeeName, now) : null;
+      // A user rule outranks the provider's own category guess — an
+      // explicit rule is more intentional than a label the file happened
+      // to carry.
       const suggestedName = suggestCategoryName(provider, row.providerCategory);
-      const categoryId = suggestedName ? await findCategoryIdByName(db, budgetId, suggestedName) : null;
+      const categoryId =
+        resolved.ruleCategoryId ?? (suggestedName ? await findCategoryIdByName(db, budgetId, suggestedName) : null);
 
       await insertTransaction(
         db,

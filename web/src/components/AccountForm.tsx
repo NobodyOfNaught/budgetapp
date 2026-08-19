@@ -99,6 +99,7 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
           <select value={importProvider} onChange={(e) => setImportProvider(e.target.value)}>
             <option value="">(none — manual entry)</option>
             <option value="wise">Wise</option>
+            <option value="becu">BECU</option>
           </select>
         </label>
       </div>

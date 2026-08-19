@@ -174,12 +174,12 @@ inferred from a rate table.
 
 ### Tables deliberately deferred
 
-`budget_invites`, `payee_rules`, `exchange_rates`, `scheduled_transactions`. All are
-additive — new tables referencing columns that already exist. None require touching
-`transactions`.
+`budget_invites`, `exchange_rates`, `scheduled_transactions`. All are additive — new tables
+referencing columns that already exist. None require touching `transactions`.
 
-`category_targets` was on this list through PR 5 — it landed in PR 6. `import_batches`
-was on it through PR 6 — it landed in PR 7 (both below).
+`category_targets` was on this list through PR 5 — it landed in PR 6. `import_batches` was
+on it through PR 6 — it landed in PR 7. `payee_rules` was on it through PR 8 — it landed in
+PR 9 (all below).
 
 ---
 
@@ -554,6 +554,50 @@ change; every number comes straight out of `transactions`/`categories`/`accounts
 - No schema change means this is another app-only promotion — feature → `uat` → `stg` →
   `main` — like PR 6 and the PR 6 polish pass.
 
+**BECU import + payee rules landed in PR 9** (`src/import/becu.ts`, `src/import/rules.ts`,
+`src/import/payee-name.ts`, `payee_rules`), driven by a real BECU checking export (23 rows,
+no header carrying anything like Wise's `ID`). Two things the file forced, and one design
+decision that came out of them:
+
+- **No transaction id column at all.** `transactions.import_id` becomes a literal composite
+  (`date|amountMinor|description|occurrence`) rather than a bank-supplied id — the exact
+  case `0000_init.sql`'s own comment anticipated ("bank-provided FITID or a content hash").
+  The `occurrence` ordinal matters for real money: two byte-identical rows in the sample
+  file (two separate $70.80 Zelle payments to the same person, same day) would otherwise
+  collide under the partial unique index and the second would be silently dropped as a
+  "duplicate" — the same class of bug Wise's multi-leg purchases exposed in PR 7.
+- **One free-text description column carries everything** — transaction type, merchant,
+  auth code, sometimes an address, sometimes a phone number. Asked to fix a specific bad
+  name (`GIANT FOOD INC #152` should read `Giant Food`), the shape that emerged is
+  heuristic-plus-override, not a hand-tuned parser: `cleanPayeeName` (best-effort, provider-
+  agnostic) does what it can, and `payee_rules` (user-defined, case-insensitive substring →
+  rename, optionally also categorize) fixes what it gets wrong — pulling the `payee_rules`
+  table forward off the deferred list and the Phase 4 roadmap line, rather than leaving it
+  for later.
+- **The heuristic and rules both apply above the provider layer, in `src/routes/imports.ts`,
+  not inside `becu.ts`.** A parser only strips its own bank's vocabulary (BECU's `payeeName`
+  drops the leading "POS Withdrawal - " type prefix and the trailing "- Card Ending In
+  NNNN"); the generic merchant-descriptor cleanup and every user rule run centrally, over
+  every provider's output. Concretely: `ParsedOrdinary` splits one field into two —
+  `payeeRaw` (verbatim, what a rule matches against — never the cleaned name, so a rule can
+  recover anything the heuristic discarded) and `payeeName` (a provider's own best-effort,
+  or equal to `payeeRaw` when the provider has nothing better, as Wise now sets it
+  explicitly). This means Wise imports get rules and the heuristic too, for free — pinned by
+  `test/imports.test.ts`'s "the same rule applies to a Wise import" case.
+  `cleanPayeeName` is deliberately imperfect on two real rows in the sample file (a
+  no-standalone-number address tail; a `WEB - KRISTINE SANDT …` deposit that collapses to
+  just `WEB`) — that imperfection is the point: a hand-tuned regex chasing every real-world
+  statement format would grow without bound and still lose to a human writing a one-line
+  rule the first time a name comes out wrong.
+- **`POST /budgets/:id/payee-rules/apply`** re-runs the budget's rules over whatever's still
+  unapproved in the review queue, so writing a rule after seeing a bad name doesn't require
+  deleting the batch and re-importing. Approved rows are never touched — a rule must not
+  silently redo something a human already confirmed — and a payee-only rule (no category)
+  leaves whatever category is already set alone rather than clearing it.
+- Purely additive migration (one new table, `payee_rules`, referencing nothing `main`
+  doesn't already have) — the normal `uat` → `stg` → `main` path, not the breaking-migration
+  exception.
+
 ---
 
 ## Roadmap
@@ -570,16 +614,16 @@ reads `budget_members`, so this is mostly UI. Activity log from the `revision` s
 Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the same budget
 see each other's edits.
 
-**Phase 4 — Statement import.** *Partially landed in PR 7* — per-provider CSV parsers
-(Wise first), an approve-imported-transactions queue, and idempotent re-import. Still to
-come: a column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
-(structured, carries FITID); PDF last. Uploads land in R2,
-parsing runs through Queues for anything large. `import_batches` tracks a run;
-`transactions.import_id` makes re-imports idempotent. Auto-categorization via a
-`payee_rules` table plus learned payee→category frequency, surfaced as an "approve
-imported transactions" queue rather than silent writes. Transfer detection matches amount
-and date across accounts and links the pair — which, when the two accounts hold different
-currencies, is precisely the cross-currency case below.
+**Phase 4 — Statement import.** *Partially landed in PR 7 and PR 9* — per-provider CSV
+parsers (Wise, then BECU), an approve-imported-transactions queue, idempotent re-import,
+and a provider-agnostic naming heuristic plus user-defined `payee_rules` (see PR 9's notes
+above). Still to come: learned payee→category frequency (rules today are explicit, never
+inferred from history); a column-mapping UI for arbitrary CSVs and per-bank saved mappings;
+then OFX/QFX/QIF (structured, carries FITID); PDF last. Uploads land in R2, parsing runs
+through Queues for anything large. `import_batches` tracks a run; `transactions.import_id`
+makes re-imports idempotent. Transfer detection matches amount and date across accounts and
+links the pair — which, when the two accounts hold different currencies, is precisely the
+cross-currency case below.
 
 **Phase 5 — Full multi-currency.** Multi-currency accounts in the UI. `budget_amount_minor`
 starts carrying real conversions. Effective rate on a transfer derived from the two legs.

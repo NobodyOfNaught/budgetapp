@@ -3,6 +3,7 @@ import { apiFetch } from '../api';
 import { AccountForm } from '../components/AccountForm';
 import { BudgetMonth } from '../components/BudgetMonth';
 import { ImportForm } from '../components/ImportForm';
+import { PayeeRules } from '../components/PayeeRules';
 import { Register } from '../components/Register';
 import { Reports } from '../components/Reports';
 import { ReviewImport } from '../components/ReviewImport';
@@ -11,7 +12,12 @@ import type { Account, CategoryGroup, ReviewTransaction } from '../types';
 // 'budget' is the landing view (the month screen), matching YNAB itself;
 // picking an account switches to 'account'. Local state, not a URL route —
 // see App.tsx's comment on why there's no router here yet.
-type View = { kind: 'budget' } | { kind: 'account'; accountId: string } | { kind: 'review' } | { kind: 'reports' };
+type View =
+  | { kind: 'budget' }
+  | { kind: 'account'; accountId: string }
+  | { kind: 'review' }
+  | { kind: 'reports' }
+  | { kind: 'rules' };
 
 export function Budget({ budgetId }: { budgetId: string }) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
@@ -80,6 +86,11 @@ export function Budget({ budgetId }: { budgetId: string }) {
           <li>
             <button onClick={() => setView({ kind: 'reports' })} style={{ fontWeight: view.kind === 'reports' ? 'bold' : 'normal' }}>
               Reports
+            </button>
+          </li>
+          <li>
+            <button onClick={() => setView({ kind: 'rules' })} style={{ fontWeight: view.kind === 'rules' ? 'bold' : 'normal' }}>
+              Payee rules
             </button>
           </li>
         </ul>
@@ -168,6 +179,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
           />
         )}
         {view.kind === 'reports' && <Reports budgetId={budgetId} categoryGroups={categoryGroups} />}
+        {view.kind === 'rules' && <PayeeRules budgetId={budgetId} categoryGroups={categoryGroups} />}
         {view.kind === 'account' &&
           (selectedAccount ? (
             <Register budgetId={budgetId} account={selectedAccount} accounts={accounts} categoryGroups={categoryGroups} />

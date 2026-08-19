@@ -373,3 +373,28 @@ export const importBatches = sqliteTable(
   },
   (t) => [index('import_batches_budget_idx').on(t.budgetId)],
 );
+
+// User-defined overrides for the generic payee-naming heuristic
+// (src/import/payee-name.ts) — see migrations/0004_payee_rules.sql. Matched
+// against a row's FULL verbatim description (transactions.import_payee_raw),
+// never against the heuristic's own output, applied at the route layer so
+// every provider gets rules, not just the one that motivated them
+// (src/routes/imports.ts). categoryId is optional — BECU carries no
+// category column at all, so a rule is the only way such a row arrives
+// pre-categorized.
+export const payeeRules = sqliteTable(
+  'payee_rules',
+  {
+    id: text('id').primaryKey(),
+    budgetId: text('budget_id')
+      .notNull()
+      .references(() => budgets.id),
+    matchText: text('match_text').notNull(),
+    payeeName: text('payee_name').notNull(),
+    categoryId: text('category_id').references(() => categories.id),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [index('payee_rules_budget_idx').on(t.budgetId)],
+);

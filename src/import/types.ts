@@ -12,8 +12,24 @@ export interface ParsedOrdinary {
   /** Signed, in `currencyCode`'s minor units. Negative is an outflow. */
   amountMinor: number;
   currencyCode: string;
-  /** Merchant/counterparty as printed by the provider; stored verbatim in import_payee_raw. */
+  /**
+   * Merchant/counterparty EXACTLY as the provider printed it (the full raw
+   * description) — stored verbatim in import_payee_raw. This is what
+   * src/import/rules.ts's payee_rules match against, deliberately BEFORE
+   * any cleanup, so a rule can recover anything payeeName or the shared
+   * cleanPayeeName heuristic (src/import/payee-name.ts) throws away.
+   */
   payeeRaw: string | null;
+  /**
+   * The provider's own best attempt at a clean name — its own vocabulary
+   * stripped (e.g. BECU's "POS Withdrawal - " prefix and "- Card Ending In
+   * NNNN" suffix), nothing more. This is what the route layer
+   * (src/routes/imports.ts) runs the SHARED cleanPayeeName heuristic over
+   * when no rule matches; null when the provider has nothing better than
+   * payeeRaw to offer. A provider whose own fields are already clean (Wise)
+   * sets this equal to payeeRaw — see src/import/wise.ts.
+   */
+  payeeName: string | null;
   memo: string | null;
   /** The provider's own category label, if it had one — a suggestion only. */
   providerCategory: string | null;

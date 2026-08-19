@@ -190,7 +190,11 @@ export function parseWiseCsv(csvText: string): ParseResult {
         date: first.date,
         amountMinor: first.targetMinor,
         currencyCode: first.targetCurrency,
+        // Wise's own Source/Target name fields are already clean —
+        // payeeName equals payeeRaw rather than running any Wise-specific
+        // stripping (there's nothing here to strip).
         payeeRaw: first.sourceName || null,
+        payeeName: first.sourceName || null,
         memo: first.note || null,
         providerCategory: first.category || null,
       });
@@ -242,6 +246,7 @@ export function parseWiseCsv(csvText: string): ParseResult {
       amountMinor: -purchaseMinor,
       currencyCode: primaryCurrency,
       payeeRaw: first.targetName || null,
+      payeeName: first.targetName || null,
       memo: first.note || null,
       providerCategory: first.category || null,
     });

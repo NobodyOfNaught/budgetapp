@@ -253,6 +253,95 @@ describe('DELETE /imports/:batchId', () => {
   });
 });
 
+describe('payee rules and the generic naming heuristic — provider-agnostic', () => {
+  const becuHeader = '"Date","No.","Description","Debit","Credit"';
+  function becuCsv(...rows: string[]): string {
+    return [becuHeader, ...rows, ''].join('\n');
+  }
+  const GIANT_FOOD_ROW =
+    '"8/14/2026","","POS Withdrawal - 160000101207 GIANT FOOD INC #152 13 COLESVILLE   MDUS - Card Ending In 1658","-109.21",""';
+
+  async function createRule(app: App, cookie: string, budgetId: string, body: Record<string, unknown>) {
+    return callJson(app, cookie, `/api/v1/budgets/${budgetId}/payee-rules`, { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  it('with no matching rule, falls back to the generic cleanPayeeName heuristic over BECU\'s own best-effort name', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-becu-heuristic@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'BECU', type: 'checking' });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: account.account.id, provider: 'becu', filename: 'statement.csv', csv: becuCsv(GIANT_FOOD_ROW) }),
+    });
+
+    const [row] = await review(app, sessionCookie, budgetId);
+    expect(row?.payeeName).toBe('GIANT FOOD INC #152');
+    expect(row?.importPayeeRaw).toBe(
+      'POS Withdrawal - 160000101207 GIANT FOOD INC #152 13 COLESVILLE   MDUS - Card Ending In 1658',
+    );
+  });
+
+  it('a matching rule outranks the heuristic and sets the category', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-becu-rule@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'BECU', type: 'checking' });
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const groceries = cats.groups.flatMap((g) => g.categories).find((c) => c.kind === 'spending')!;
+
+    await createRule(app, sessionCookie, budgetId, { matchText: 'GIANT FOOD INC', payeeName: 'Giant Food', categoryId: groceries.id });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: account.account.id, provider: 'becu', filename: 'statement.csv', csv: becuCsv(GIANT_FOOD_ROW) }),
+    });
+
+    const [row] = await review(app, sessionCookie, budgetId);
+    expect(row?.payeeName).toBe('Giant Food'); // not the heuristic's "GIANT FOOD INC #152"
+    expect(row?.categoryId).toBe(groceries.id); // rule beats the (nonexistent, for BECU) provider suggestion
+  });
+
+  it('the same rule applies to a Wise import too — rules and the heuristic are not BECU-specific', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-wise-rule@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    await createRule(app, sessionCookie, budgetId, { matchText: 'Giant Food', payeeName: 'Giant Food (renamed)' });
+
+    await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD));
+
+    const [row] = await review(app, sessionCookie, budgetId);
+    expect(row?.payeeName).toBe('Giant Food (renamed)');
+    expect(row?.importPayeeRaw).toBe('Giant Food'); // verbatim text untouched regardless
+  });
+
+  it('re-importing the same BECU file is a no-op, including the two identical Zelle rows', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-becu-dedupe@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'BECU', type: 'checking' });
+    const zelleRows = becuCsv(
+      GIANT_FOOD_ROW,
+      '"8/2/2026","","Transfer Withdrawal -  Zelle LEMERY ROLLINS (800)233-2328","-70.80",""',
+      '"8/2/2026","","Transfer Withdrawal -  Zelle LEMERY ROLLINS (800)233-2328","-70.80",""',
+    );
+
+    const { body: first } = await callJson<ImportSummary>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: account.account.id, provider: 'becu', filename: 'statement.csv', csv: zelleRows }),
+    });
+    expect(first.imported).toBe(3);
+    const afterFirst = await review(app, sessionCookie, budgetId);
+    expect(afterFirst).toHaveLength(3);
+
+    const { body: second } = await callJson<ImportSummary>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: account.account.id, provider: 'becu', filename: 'statement.csv', csv: zelleRows }),
+    });
+    expect(second.imported).toBe(0);
+    expect(second.duplicates).toBe(3);
+    expect(await review(app, sessionCookie, budgetId)).toHaveLength(3);
+  });
+});
+
 describe('authorization', () => {
   it('403s import, review and undo for a non-member', async () => {
     const { budgetId } = await signInNewUser('import-owner@example.com');

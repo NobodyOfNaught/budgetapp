@@ -197,3 +197,17 @@ export interface IncomeExpenseReport {
 export interface NetWorthReport {
   months: { month: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
 }
+
+// ---------------------------------------------------------------------------
+// Payee rules — mirrors src/routes/payee-rules.ts. Overrides the generic
+// cleanPayeeName heuristic (src/import/payee-name.ts) for any provider's
+// import, matched against a row's raw statement text (ReviewTransaction's
+// importPayeeRaw above) rather than its cleaned-up payeeName.
+// ---------------------------------------------------------------------------
+
+export interface PayeeRule {
+  id: string;
+  matchText: string;
+  payeeName: string;
+  categoryId: string | null;
+}

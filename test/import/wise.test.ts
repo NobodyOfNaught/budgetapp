@@ -51,6 +51,7 @@ describe('single-currency card purchase', () => {
       amountMinor: -14918,
       currencyCode: 'USD',
       payeeRaw: 'Giant Food',
+      payeeName: 'Giant Food',
       memo: null,
       providerCategory: 'Groceries',
     });
@@ -206,6 +207,20 @@ describe('file-level reporting', () => {
     const result = parseWiseCsv(`${HEADER}\n`);
     expect(result.rows).toEqual([]);
     expect(result.rowCount).toBe(0);
+  });
+});
+
+describe('payeeName mirrors payeeRaw', () => {
+  it('sets payeeName equal to payeeRaw on every ordinary row — Wise\'s own fields are already clean, nothing to strip', () => {
+    // PR 9 split payeeRaw into a verbatim field (what payee_rules match
+    // against) and payeeName (a provider's own best-effort clean name, fed
+    // to the shared cleanPayeeName heuristic when no rule matches). Wise
+    // never needs a separate best-effort — this pins that the contract
+    // split didn't change Wise's actual behavior.
+    const result = parseWiseCsv(csv(GIANT_FOOD, SPLIT_LEG_CAD, SPLIT_LEG_USD));
+    for (const row of ordinaries(result)) {
+      expect(row.payeeName).toBe(row.payeeRaw);
+    }
   });
 });
 

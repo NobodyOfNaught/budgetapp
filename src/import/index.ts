@@ -3,17 +3,20 @@
 
 import type { StatementParser } from './types';
 import { parseWiseCsv, suggestedCategoryName as wiseSuggestion } from './wise';
+import { parseBecuCsv, suggestedCategoryName as becuSuggestion } from './becu';
 
-export const IMPORT_PROVIDERS = ['wise'] as const;
+export const IMPORT_PROVIDERS = ['wise', 'becu'] as const;
 export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 
 const PARSERS: Record<ImportProvider, StatementParser> = {
   wise: parseWiseCsv,
+  becu: parseBecuCsv,
 };
 
 /** Maps a provider's own category label onto a seeded category NAME, or null when there's no confident match. */
 const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | null) => string | null> = {
   wise: wiseSuggestion,
+  becu: becuSuggestion,
 };
 
 export function isImportProvider(value: string): value is ImportProvider {

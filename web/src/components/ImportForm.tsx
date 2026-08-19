@@ -2,7 +2,10 @@ import { useState } from 'react';
 import { apiFetch } from '../api';
 import type { Account, ImportSummary } from '../types';
 
-const PROVIDERS: { value: string; label: string }[] = [{ value: 'wise', label: 'Wise' }];
+const PROVIDERS: { value: string; label: string }[] = [
+  { value: 'wise', label: 'Wise' },
+  { value: 'becu', label: 'BECU' },
+];
 
 /**
  * Upload a statement file for one account. The file is read as text in the

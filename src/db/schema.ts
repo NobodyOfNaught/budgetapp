@@ -341,9 +341,14 @@ export const transactions = sqliteTable(
     index('transactions_transfer_idx').on(t.transferTransactionId),
     index('transactions_parent_idx').on(t.parentTransactionId),
     index('transactions_budget_revision_idx').on(t.budgetId, t.revision),
+    // Excludes soft-deleted rows (migrations/0005_import_dedupe_ignores_deleted.sql)
+    // — a soft-deleted row (e.g. an undone import, see
+    // src/routes/imports.ts's DELETE /:batchId) must not block re-inserting
+    // the same import_id, matching how every other query in this app
+    // already treats deletedAt as "gone".
     uniqueIndex('transactions_account_import_idx')
       .on(t.accountId, t.importId)
-      .where(sql`${t.importId} is not null`),
+      .where(sql`${t.importId} is not null and ${t.deletedAt} is null`),
   ],
 );
 

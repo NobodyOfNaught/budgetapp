@@ -273,6 +273,28 @@ describe('DELETE /imports/:batchId', () => {
     expect(register.accountBalance).toBe(0);
   });
 
+  it('re-importing the same file to the same account after an undo succeeds cleanly — regression for the soft-deleted-row unique-index bug', async () => {
+    // A soft-deleted transaction must not occupy its (account_id, import_id)
+    // slot forever — undo, then import again, has to behave exactly like
+    // importing fresh. This previously threw an uncaught UNIQUE constraint
+    // violation on the very first row (see migrations/0005), surfacing to
+    // the user as a generic "could not import that file" error with no
+    // batch record left behind at all.
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-undo-reimport@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+
+    const { body: first } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD, SPLIT_CAD, SPLIT_USD));
+    const reviewCountBeforeUndo = (await review(app, sessionCookie, budgetId)).length; // a transfer's two legs are two real rows
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/${first.batchId}`, { method: 'DELETE' });
+    expect(await review(app, sessionCookie, budgetId)).toHaveLength(0);
+
+    const { status, body: second } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD, SPLIT_CAD, SPLIT_USD));
+    expect(status).toBe(201);
+    expect(second.imported).toBe(first.imported); // fully re-imported, none blocked as a false "duplicate"
+    expect(second.duplicates).toBe(0);
+    expect(await review(app, sessionCookie, budgetId)).toHaveLength(reviewCountBeforeUndo);
+  });
+
   it('404s for a batch that is not this budget’s', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('import-undo-missing@example.com');
     const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/nope`, { method: 'DELETE' });

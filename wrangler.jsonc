@@ -54,11 +54,21 @@
         "binding": "ASSETS",
         "not_found_handling": "single-page-application"
       },
+      // migrations_dir is present (unlike the original design) so
+      // `wrangler d1 migrations apply --env stg` can actually run. stg no
+      // longer NEVER applies migrations — see CLAUDE.md's "Deployment
+      // process": an additive (expand-only) migration is applied here too,
+      // ahead of prod, as an extra checkpoint against real data. Only a
+      // migration judged to break the currently-live prod code skips this
+      // env, and even then nothing here stops it mechanically — that
+      // judgment call is a documented human/agent decision, not a config
+      // flag, because it depends on reading the migration's SQL.
       "d1_databases": [
         {
           "binding": "DB",
           "database_name": "budgetapp-db",
-          "database_id": "8929286f-b8c1-44c3-9579-0636ba5684ad"
+          "database_id": "8929286f-b8c1-44c3-9579-0636ba5684ad",
+          "migrations_dir": "migrations"
         }
       ],
       "ratelimits": [

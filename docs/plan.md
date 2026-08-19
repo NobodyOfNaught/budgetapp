@@ -615,8 +615,13 @@ Three long-lived branches, three Workers, two databases:
 | Branch | Worker | Database | Migrations | Non-prod branch builds |
 |---|---|---|---|---|
 | `main` | `budgetapp` | `budgetapp-db` (prod) | **applied** | disabled |
-| `stg` | `budgetapp-stg` | `budgetapp-db` (prod) | **never** | disabled |
+| `stg` | `budgetapp-stg` | `budgetapp-db` (prod) | **applied — unless breaking** | disabled |
 | `uat` | `budgetapp-uat` | `budgetapp-uat-db` | **applied** | **enabled** |
+
+`stg`'s "unless breaking" is a per-migration judgment call, not a fixed policy — see
+"Guarding the shared production database" below and, for the operational sequencing rule
+an agent working in this repo follows (uat first, stop for approval, then stg/main), the
+project's `CLAUDE.md`.
 
 `wrangler.jsonc` uses the top level for production and `env.stg` / `env.uat` for the other
 two. Each of the three Workers connects to this repo in the Cloudflare dashboard
@@ -634,10 +639,14 @@ build (all three):  npm ci && npm run check && npm run build
 
 ```
 main deploy : npx wrangler d1 migrations apply budgetapp-db --remote && npx wrangler deploy
-stg  deploy : node scripts/assert-schema-current.mjs && npx wrangler deploy --env stg
+stg  deploy : npx wrangler d1 migrations apply budgetapp-db --env stg --remote && npx wrangler deploy --env stg
 uat  deploy : npx wrangler d1 migrations apply budgetapp-uat-db --env uat --remote \
               && npx wrangler deploy --env uat
 ```
+
+`stg`'s deploy command applies migrations now — see "Guarding the shared production
+database" for when that step is deliberately skipped for a given promotion (rare, and a
+per-migration decision, not a standing config).
 
 ### PR checks without Actions
 
@@ -668,28 +677,47 @@ an arbitrary feature branch from ever executing against the production database.
 
 ### Guarding the shared production database
 
-`stg` points at production data, so the invariant is: *`stg` may never run code that needs a
-schema production does not already have.* `scripts/assert-schema-current.mjs` enforces it
-directly — it shells out to `wrangler d1 migrations list --env stg --remote` and fails the
-build if any migration in the repo is unapplied. This is stronger than blocking PRs that
-touch `migrations/`, because it asserts the condition that actually matters rather than a
-proxy for it.
+`stg` points at production data, so the invariant is: *`stg` may never run code that needs
+a schema production's currently-live code can't tolerate.* That's a narrower requirement
+than "stg's schema must exactly match what's applied" — the original version of this
+section required the latter, unconditionally skipping `stg` for every migration, which was
+stricter than necessary. Since every migration in this repo is already required to be
+expand/contract (below), most migrations are just as safe to apply to `stg` as an app-only
+change is, and `stg` rehearsing them against real production data before `main` sees them
+is a real extra checkpoint worth keeping, not one worth skipping by default.
 
-The practical consequence, which is worth being explicit about since it refines the
-promotion flow:
+The corrected promotion flow:
 
-- **App-only changes**: feature → `uat` → `stg` → `main`.
-- **Schema changes**: feature → `uat` → `main`, **skipping `stg`**. The guard will fail a
-  `stg` build carrying an unapplied migration, by design — that is the flow working, not a
-  problem to route around.
+- **App-only changes**: feature → `uat` → `stg` → `main`. Unchanged.
+- **Additive (expand-only) migrations** — a new table, a new nullable column, a new
+  index; anything the code *currently live on `main`* can simply ignore because it never
+  references it: feature → `uat` → `stg` → `main`. **This is now the default** for a
+  migration-carrying change, matching the app-only path, because that's what
+  expand/contract discipline (point 2 below) is supposed to guarantee is always safe.
+- **A migration that would break the currently-live `main` code** (a rename, a drop, a new
+  `NOT NULL` column with no safe default, an incompatible type change): feature → `uat` →
+  `main`, **skipping `stg`**. `stg` is left on its previous version until `main` is
+  promoted. This should be rare — it's precisely the case expand/contract exists to avoid
+  needing.
+
+Which bucket a given migration falls into is a judgment call made by reading its SQL, not
+something a script can fully automate — `scripts/assert-schema-current.mjs`'s old
+unconditional "any unapplied migration fails the `stg` build" behavior is no longer the
+default `stg` deploy command (see the deploy commands above); it remains available as a
+manual diagnostic if you want to check `budgetapp-db`'s pending-migration state before
+deciding. See the project's `CLAUDE.md` for the full operational sequencing rule an agent
+follows here, including the hard "stop and wait for UAT approval before touching
+`stg`/`main`" gate.
 
 Two further consequences of `stg` sharing production data, both worth stating plainly:
 
-1. The guard stops schema drift but **not** a bad write path. A `stg` build with a buggy
-   mutation will damage real data. Treat `stg` deploys with production care.
-2. Because `stg` and `main` run different code against the same schema, **every migration
-   must be expand/contract**: add nullable columns, backfill, switch reads, drop in a later
-   release — never rename or drop in a single migration.
+1. Even with the schema aligned, `stg` running a buggy mutation will damage real data.
+   Treat `stg` deploys with production care regardless of whether this promotion carries a
+   migration.
+2. Because `stg` and `main` can briefly run different code against the same schema mid-
+   promotion, **every migration must be expand/contract**: add nullable columns, backfill,
+   switch reads, drop in a later release — never rename or drop in a single migration. This
+   was already the rule; it's now also the reason the default case above is safe.
 
 Secrets (`EMAIL_FROM`, session signing key) are set per environment with `wrangler secret put`.
 

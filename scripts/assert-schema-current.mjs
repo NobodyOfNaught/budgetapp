@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// Guards `stg`, which shares the PRODUCTION database (see the plan:
-// "Guarding the shared production database"). The invariant: stg must never
-// run code that expects a schema production doesn't already have. This
-// checks that invariant directly, against the real remote database, rather
-// than a proxy for it like "did this PR touch migrations/".
-//
-// Run as the stg deploy command, BEFORE `wrangler deploy --env stg`, so an
-// unapplied migration fails the build instead of shipping.
+// Optional manual diagnostic for `stg`, which shares the PRODUCTION database
+// (see the plan: "Guarding the shared production database" and CLAUDE.md's
+// "Deployment process"). It is no longer the default stg deploy-command gate
+// — stg now applies migrations itself (`wrangler d1 migrations apply
+// budgetapp-db --env stg --remote`) for anything additive, same as any other
+// env, and only a migration judged to break the currently-live prod code
+// skips stg entirely. This script still answers a narrower, useful question
+// on demand: "is stg's schema fully caught up with what's been applied
+// elsewhere?" — run it by hand if that's ever in doubt.
 
 import { spawnSync } from 'node:child_process';
 
@@ -40,9 +41,9 @@ const pending = [...new Set(output.match(/\d{4}_[\w-]+\.sql/g) ?? [])];
 if (pending.length > 0) {
   console.error(
     `\n✗ ${DATABASE} (stg) is missing ${pending.length} migration(s): ${pending.join(', ')}\n` +
-      '  stg shares the production database and never applies migrations itself.\n' +
-      '  Apply this migration via a `main` (prod) or `uat` deploy first — see the\n' +
-      '  "Guarding the shared production database" section of the project plan.',
+      '  Apply it with `wrangler d1 migrations apply budgetapp-db --env stg --remote`\n' +
+      '  (unless it is judged to break the currently-live prod code, in which case it\n' +
+      '  should skip stg on purpose) — see CLAUDE.md\'s "Deployment process".',
   );
   process.exit(1);
 }

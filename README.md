@@ -20,12 +20,14 @@ and wiring up deployment.
 
 Three environments, three Workers, two databases — `stg` deliberately shares
 the production database. See the plan's "Environments & deployment" section
-for the full reasoning; the short version:
+for the full reasoning, and [`CLAUDE.md`](CLAUDE.md) for the exact deploy
+sequencing rule (uat first, stop for approval, then stg/main); the short
+version:
 
 | Branch | Worker | URL | Database | Migrations |
 |---|---|---|---|---|
 | `main` | `budgetapp` | https://budgetapp.palle-s-account.workers.dev | `budgetapp-db` (prod) | applied every deploy |
-| `stg` | `budgetapp-stg` | https://budgetapp-stg.palle-s-account.workers.dev | `budgetapp-db` (prod) | **never** — guarded |
+| `stg` | `budgetapp-stg` | https://budgetapp-stg.palle-s-account.workers.dev | `budgetapp-db` (prod) | applied — unless the migration would break the currently-live `main` code |
 | `uat` | `budgetapp-uat` | https://budgetapp-uat.palle-s-account.workers.dev | `budgetapp-uat-db` | applied every deploy |
 
 All three Workers and both databases already exist and are deployed (the
@@ -110,7 +112,7 @@ pipeline and the PR check. For **each** of the three Workers
    | Worker | Deploy command |
    |---|---|
    | `budgetapp` | `npx wrangler d1 migrations apply budgetapp-db --remote && npx wrangler deploy --env=""` |
-   | `budgetapp-stg` | `node scripts/assert-schema-current.mjs && npx wrangler deploy --env stg` |
+   | `budgetapp-stg` | `npx wrangler d1 migrations apply budgetapp-db --env stg --remote && npx wrangler deploy --env stg` |
    | `budgetapp-uat` | `npx wrangler d1 migrations apply budgetapp-uat-db --env uat --remote && npx wrangler deploy --env uat` |
 
    (`--env=""` on the `main` deploy is deliberate — with three environments

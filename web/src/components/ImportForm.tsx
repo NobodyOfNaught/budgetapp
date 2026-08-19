@@ -6,6 +6,7 @@ const PROVIDERS: { value: string; label: string }[] = [
   { value: 'wise', label: 'Wise' },
   { value: 'becu', label: 'BECU' },
   { value: 'splitwise', label: 'Splitwise' },
+  { value: 'aacu', label: 'AACU' },
 ];
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */

@@ -26,20 +26,12 @@
 
 import { parseAmountToMinor } from '../lib/money';
 import { parseCsvRecords } from './csv';
+import { toIsoDate } from './dates';
 import type { ParsedRow, ParseResult, SkippedRow } from './types';
 
 // This provider never sends a category — always null.
 export function suggestedCategoryName(_providerCategory: string | null): string | null {
   return null;
-}
-
-const DATE_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
-
-function toIsoDate(raw: string): string | null {
-  const match = DATE_RE.exec(raw.trim());
-  if (!match) return null;
-  const [, month, day, year] = match;
-  return `${year}-${month!.padStart(2, '0')}-${day!.padStart(2, '0')}`;
 }
 
 /** Strips thousands separators before handing off to parseAmountToMinor, which doesn't accept commas. */

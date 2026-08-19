@@ -690,6 +690,47 @@ uneditable text. This PR closes that gap entirely client-side, no backend change
   `hiddenAt`/`sortOrder` (group), fields the API already serialized on the wire since PR 4
   but the frontend never declared.
 
+**AACU import landed in PR 13** (`src/import/aacu.ts`), the fourth import provider and the
+third bank/credit-union CSV (after Wise and BECU). Close to BECU's shape — `M/D/YYYY` dates,
+sign decided by which of Debit/Credit is populated rather than the printed character, one
+free-text description column carrying the transaction type — but two things about this
+export are AACU's own, found by analyzing a real 52-row file before writing any parser code:
+
+- **A `Status` column (`Posted`/`Pending`), and a pending row's description is printed in a
+  structurally different shape than the same transaction once posted** — no
+  `Withdrawal POS #… / … Card NNNN` wrapper at all, just the raw merchant string. Because
+  `import_id` is content-derived (this format has no transaction-id column either), a pending
+  row can never dedupe against its own later-posted version — importing it would guarantee a
+  duplicate once the bank posts it. **Pending rows are skipped**, with a visible reason in the
+  import summary, rather than imported as `uncleared`; they import normally, once, when they
+  post. One deliberate test case: nine real rows have `Posted` status but contain the literal
+  word `PENDING` inside Uber's own descriptor (`UBER * PENDING …`) — the parser has to key off
+  the `Status` column, not scan description text, and a test pins exactly that.
+- **Dividend credits print as `.01`, not `0.01`.** `parseAmountToMinor`
+  (`src/lib/money.ts`) requires a digit before the decimal point and throws on a bare leading
+  dot; copying BECU's amount reader verbatim would have silently dropped both dividend rows
+  as "neither Debit nor Credit had a readable amount" — the kind of bug that's invisible
+  unless you go looking for it, since a skip is only visible in the import summary's list, not
+  a crash. Caught by reconciling the file's own running Balance column against the parser's
+  output *before* writing the fix, and pinned by a regression test asserting `.01` parses to
+  `1` minor unit.
+- **`toIsoDate`** (BECU's private `M/D/YYYY` → `YYYY-MM-DD` converter) moved to a new shared
+  `src/import/dates.ts` now that a second provider needs the identical logic — `becu.ts`
+  imports it instead of declaring its own copy. The existing BECU golden-test suite is what
+  guarantees the move is behavior-preserving.
+- Verified end to end against the real file: walking the 51 posted rows from an implied
+  opening balance of `$336.74` (the oldest row's own stated balance minus that row's signed
+  amount) reproduces every stated `Balance` to the cent, ending at `$270.21` — net `−$66.53`.
+  That balance-column reconciliation, not a hand-summed literal, is the whole-file test's
+  ground truth (stronger than BECU's, which had no running-balance column to check against).
+  A real-browser smoke test against the actual file confirmed the same `−$66.53` on a fresh
+  account's register, cleaned merchant names, the pending row's skip reason visible in the UI,
+  and a zero-row re-import.
+- No migration, no route change — `cleared` stays hardcoded `'cleared'` for every provider
+  (skipping pending rows means the parser contract doesn't need a `cleared` field), and
+  `accounts.import_provider`/`import_batches.provider` are free-form `text` columns that
+  needed no schema change to accept `'aacu'`.
+
 ---
 
 ## Roadmap
@@ -706,11 +747,12 @@ reads `budget_members`, so this is mostly UI. Activity log from the `revision` s
 Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the same budget
 see each other's edits.
 
-**Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, and PR 10* —
-per-provider CSV parsers (Wise, then BECU, then Splitwise), an approve-imported-transactions
-queue, idempotent re-import, a provider-agnostic naming heuristic plus user-defined
-`payee_rules`, and — new in PR 10 — a non-bank provider modeled as a net-position clearing
-account with per-import member selection (see PR 10's notes above). Still to come: learned
+**Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, and PR 13* —
+per-provider CSV parsers (Wise, then BECU, then Splitwise, then AACU), an
+approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
+heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
+as a net-position clearing account with per-import member selection (see PR 10's notes
+above). Still to come: learned
 payee→category frequency (rules today are explicit, never inferred from history); a
 column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
 (structured, carries FITID); PDF last. Uploads land in R2, parsing runs through Queues for

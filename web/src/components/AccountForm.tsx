@@ -101,6 +101,7 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
             <option value="wise">Wise</option>
             <option value="becu">BECU</option>
             <option value="splitwise">Splitwise</option>
+            <option value="aacu">AACU</option>
           </select>
         </label>
       </div>

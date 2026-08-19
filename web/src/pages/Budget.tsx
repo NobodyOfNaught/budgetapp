@@ -174,6 +174,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
             categoryGroups={categoryGroups}
             refreshToken={accountsVersion}
             hasAccounts={accounts.length > 0}
+            onCategoriesChanged={reloadCategories}
           />
         )}
         {view.kind === 'review' && (

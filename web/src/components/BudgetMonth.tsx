@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState } from 'react';
-import { apiFetch } from '../api';
+import { ApiError, apiFetch } from '../api';
 import type { CategoryGroup, MonthView, TargetStatus, TargetView } from '../types';
+import { CategoryForm } from './CategoryForm';
+import { CategoryGroupForm } from './CategoryGroupForm';
 import { TargetForm } from './TargetForm';
 import { UpcomingPanel } from './UpcomingPanel';
 
@@ -61,6 +63,7 @@ export function BudgetMonth({
   categoryGroups,
   refreshToken,
   hasAccounts,
+  onCategoriesChanged,
 }: {
   budgetId: string;
   categoryGroups: CategoryGroup[];
@@ -68,6 +71,8 @@ export function BudgetMonth({
   refreshToken?: number;
   /** Whether the budget has any accounts at all — drives the "add an account" empty-state hint below. */
   hasAccounts: boolean;
+  /** Called after any category/group create, rename, hide, or delete — the parent's reloadCategories. */
+  onCategoriesChanged: () => void;
 }) {
   const [month, setMonth] = useState(currentMonth);
   const [view, setView] = useState<MonthView | null>(null);
@@ -82,6 +87,20 @@ export function BudgetMonth({
   // component's doc comment) picks up the change too.
   const [targetsVersion, setTargetsVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // Category/group CRUD — kept inline here rather than a separate nav tab,
+  // since this grid is where categories are viewed constantly. See
+  // docs/plan.md's PR 12 notes.
+  const [showGroupForm, setShowGroupForm] = useState(false);
+  const [addCategoryForGroup, setAddCategoryForGroup] = useState<string | null>(null);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [editingGroupName, setEditingGroupName] = useState('');
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [editingCategoryName, setEditingCategoryName] = useState('');
+  const [showHidden, setShowHidden] = useState(false);
+  // Separate from `error` (assignment save failures) so a category-CRUD
+  // error can't clobber, or get clobbered by, an unrelated one.
+  const [categoryError, setCategoryError] = useState<string | null>(null);
 
   function reload() {
     apiFetch<MonthView>(`/budgets/${budgetId}/months/${month}`).then((res) => {
@@ -165,6 +184,99 @@ export function BudgetMonth({
     setMoveOpenFor(null);
   }
 
+  function startEditGroup(group: CategoryGroup) {
+    setEditingGroupId(group.id);
+    setEditingGroupName(group.name);
+  }
+
+  async function renameGroup(groupId: string) {
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/groups/${groupId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: editingGroupName }),
+      });
+      setEditingGroupId(null);
+      onCategoriesChanged();
+    } catch {
+      setCategoryError('Could not rename that group.');
+    }
+  }
+
+  async function toggleHideGroup(groupId: string, hide: boolean) {
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/groups/${groupId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ hidden: hide }),
+      });
+      onCategoriesChanged();
+    } catch {
+      setCategoryError('Could not update that group.');
+    }
+  }
+
+  async function deleteGroup(groupId: string, name: string) {
+    if (!window.confirm(`Delete "${name}"? This only works while it has no categories left.`)) return;
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/groups/${groupId}`, { method: 'DELETE' });
+      onCategoriesChanged();
+    } catch (e) {
+      const code = e instanceof ApiError ? (e.body as { error?: string } | undefined)?.error : undefined;
+      setCategoryError(
+        code === 'group_not_empty'
+          ? `"${name}" still has categories in it — move or delete them first.`
+          : 'Could not delete that group.',
+      );
+    }
+  }
+
+  function startEditCategory(category: { id: string; name: string }) {
+    setEditingCategoryId(category.id);
+    setEditingCategoryName(category.name);
+  }
+
+  async function renameCategory(categoryId: string) {
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/${categoryId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: editingCategoryName }),
+      });
+      setEditingCategoryId(null);
+      onCategoriesChanged();
+    } catch {
+      setCategoryError('Could not rename that category.');
+    }
+  }
+
+  async function toggleHideCategory(categoryId: string, hide: boolean) {
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/${categoryId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ hidden: hide }),
+      });
+      onCategoriesChanged();
+    } catch {
+      setCategoryError('Could not update that category.');
+    }
+  }
+
+  async function deleteCategory(categoryId: string, name: string) {
+    if (!window.confirm(`Delete "${name}"? History is kept, but it stops appearing anywhere new.`)) return;
+    setCategoryError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/categories/${categoryId}`, { method: 'DELETE' });
+      onCategoriesChanged();
+    } catch {
+      setCategoryError('Could not delete that category.');
+    }
+  }
+
+  const hiddenCount = categoryGroups.flatMap((g) => g.categories).filter((c) => c.kind !== 'income' && c.hiddenAt).length;
+
   return (
     <section>
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -218,22 +330,82 @@ export function BudgetMonth({
             </thead>
             <tbody>
               {categoryGroups.map((group) => {
-                const rows = group.categories.filter((c) => c.kind !== 'income' && !c.hiddenAt);
-                if (rows.length === 0) return null;
+                const rows = group.categories.filter((c) => c.kind !== 'income' && (showHidden || !c.hiddenAt));
+                const nonIncomeCount = group.categories.filter((c) => c.kind !== 'income').length;
+                // A genuinely empty group (nonIncomeCount === 0 — e.g. just
+                // created) always shows, so it can be used at all. A group
+                // whose categories are all hidden collapses away when
+                // showHidden is off, same as before this PR.
+                if (rows.length === 0 && nonIncomeCount > 0) return null;
                 return (
                   <Fragment key={group.id}>
                     <tr>
                       <td colSpan={6} style={{ paddingTop: '1rem', fontWeight: 'bold', borderBottom: '1px solid #ccc' }}>
-                        {group.name}
+                        {editingGroupId === group.id ? (
+                          <>
+                            <input value={editingGroupName} onChange={(e) => setEditingGroupName(e.target.value)} autoFocus />{' '}
+                            <button onClick={() => renameGroup(group.id)} style={{ fontWeight: 'normal' }}>
+                              Save
+                            </button>{' '}
+                            <button onClick={() => setEditingGroupId(null)} style={{ fontWeight: 'normal' }}>
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <span style={group.hiddenAt ? { color: '#999' } : undefined}>{group.name}</span>
+                        )}
+                        {!group.isSystem && editingGroupId !== group.id && (
+                          <span style={{ fontWeight: 'normal', marginLeft: '0.75rem' }}>
+                            <button onClick={() => startEditGroup(group)}>Rename</button>{' '}
+                            <button onClick={() => toggleHideGroup(group.id, !group.hiddenAt)}>
+                              {group.hiddenAt ? 'Unhide' : 'Hide'}
+                            </button>{' '}
+                            {rows.length === 0 && (
+                              <button onClick={() => deleteGroup(group.id, group.name)}>Delete</button>
+                            )}{' '}
+                            <button onClick={() => setAddCategoryForGroup((g) => (g === group.id ? null : group.id))}>
+                              + Add category
+                            </button>
+                          </span>
+                        )}
                       </td>
                     </tr>
+                    {addCategoryForGroup === group.id && (
+                      <tr>
+                        <td colSpan={6} style={{ background: '#fafafa', padding: '0.5rem' }}>
+                          <CategoryForm
+                            budgetId={budgetId}
+                            groupId={group.id}
+                            onCreated={() => {
+                              setAddCategoryForGroup(null);
+                              onCategoriesChanged();
+                            }}
+                            onCancel={() => setAddCategoryForGroup(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
                     {rows.map((c) => {
                       const amounts = view?.categories[c.id] ?? { assigned: 0, activity: 0, available: 0 };
                       const target = view?.targets[c.id];
                       return (
                         <Fragment key={c.id}>
                           <tr style={{ borderTop: '1px solid #eee' }}>
-                            <td>{c.name}</td>
+                            <td>
+                              {editingCategoryId === c.id ? (
+                                <>
+                                  <input
+                                    value={editingCategoryName}
+                                    onChange={(e) => setEditingCategoryName(e.target.value)}
+                                    autoFocus
+                                  />{' '}
+                                  <button onClick={() => renameCategory(c.id)}>Save</button>{' '}
+                                  <button onClick={() => setEditingCategoryId(null)}>Cancel</button>
+                                </>
+                              ) : (
+                                <span style={c.hiddenAt ? { color: '#999' } : undefined}>{c.name}</span>
+                              )}
+                            </td>
                             <td align="right">
                               <input
                                 value={drafts[c.id] ?? ''}
@@ -261,6 +433,16 @@ export function BudgetMonth({
                             <td>
                               <button onClick={() => toggleTarget(c.id)}>{rawTargets[c.id] ? 'Edit target' : 'Set target'}</button>{' '}
                               <button onClick={() => toggleMove(c.id)}>Move</button>
+                              {c.kind === 'spending' && editingCategoryId !== c.id && (
+                                <>
+                                  {' '}
+                                  <button onClick={() => startEditCategory(c)}>Rename</button>{' '}
+                                  <button onClick={() => toggleHideCategory(c.id, !c.hiddenAt)}>
+                                    {c.hiddenAt ? 'Unhide' : 'Hide'}
+                                  </button>{' '}
+                                  <button onClick={() => deleteCategory(c.id, c.name)}>Delete</button>
+                                </>
+                              )}
                             </td>
                           </tr>
                           {moveOpenFor === c.id && (
@@ -315,6 +497,27 @@ export function BudgetMonth({
             </tbody>
           </table>
         </div>
+
+        {categoryError && <p style={{ color: '#c0392b' }}>{categoryError}</p>}
+
+        <p>
+          <button onClick={() => setShowGroupForm((v) => !v)}>{showGroupForm ? 'Cancel' : '+ Add group'}</button>
+          {showGroupForm && (
+            <CategoryGroupForm
+              budgetId={budgetId}
+              onCreated={() => {
+                setShowGroupForm(false);
+                onCategoriesChanged();
+              }}
+              onCancel={() => setShowGroupForm(false)}
+            />
+          )}
+          {hiddenCount > 0 && (
+            <button onClick={() => setShowHidden((v) => !v)} style={{ marginLeft: '0.5rem' }}>
+              {showHidden ? 'Hide hidden' : `Show hidden (${hiddenCount})`}
+            </button>
+          )}
+        </p>
         </>
       )}
     </section>

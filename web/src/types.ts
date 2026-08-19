@@ -59,12 +59,16 @@ export interface Category {
   kind: CategoryKind;
   linkedAccountId: string | null;
   hiddenAt: number | null;
+  sortOrder: number;
+  note: string | null;
 }
 
 export interface CategoryGroup {
   id: string;
   name: string;
   isSystem: boolean;
+  hiddenAt: number | null;
+  sortOrder: number;
   categories: Category[];
 }
 

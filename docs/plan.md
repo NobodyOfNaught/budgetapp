@@ -648,6 +648,48 @@ design than Wise/BECU:
   on `main` references) — the normal `uat` → `stg` → `main` path, not the breaking-migration
   exception.
 
+**Category and category-group CRUD landed in PR 12.** The API (`src/routes/categories.ts`)
+had supported create/rename/reorder/hide/delete for both categories and groups since PR 4 —
+correctly guarded against editing system-managed rows — but nothing in `web/src/` ever
+rendered a control for any of it; `BudgetMonth.tsx` showed a category's name as plain,
+uneditable text. This PR closes that gap entirely client-side, no backend changes:
+
+- **Lives inline in `BudgetMonth.tsx`**, not a separate nav tab — categories are viewed here
+  constantly, and it's the natural place for it. Per-group controls (Rename, Hide/Unhide,
+  "+ Add category", and Delete when empty) sit in the group's header row; per-category
+  controls (Rename, Hide/Unhide, Delete) sit next to the existing Set-target/Move buttons —
+  same "extra `<tr>` toggled by a button" mechanic the file already used for those two.
+  `CategoryGroupForm.tsx`/`CategoryForm.tsx` (new, tiny) mirror `AccountForm.tsx`'s
+  toggle-a-create-form pattern; the CRUD handlers mirror `PayeeRules.tsx`'s
+  apiFetch-in-a-try/catch, reload-after-mutation, `window.confirm`-before-delete shape.
+- **`hidden` went from a schema field with no effect to a real one.** `hiddenAt` existed on
+  both tables since PR 4 but nothing filtered on it — a "hidden" category looked identical to
+  a visible one. The grid's row filter became `c.kind !== 'income' && (showHidden ||
+  !c.hiddenAt)`, with a "Show hidden (N)" toggle below the table revealing hidden rows
+  greyed out with an Unhide button. The `assignable` list (feeds the Move-to and target
+  dropdowns) stays hidden-excluded regardless of `showHidden` — moving money into something
+  hidden isn't the point of hiding it.
+- **A real bug surfaced by writing the smoke test, fixed before shipping:** the group
+  header's original early-return (`if (rows.length === 0) return null`) — reasonable when
+  there was no way to act on an empty group — silently ate every freshly created group,
+  since a brand-new group has zero categories by definition. "+ Add group" would work, the
+  group would exist server-side, and then nothing would render at all: no way to add a
+  category into it, no way to delete it, through the UI. Fixed by only collapsing a group
+  when it has categories that are *all* filtered out by hiddenness — a genuinely empty group
+  (`nonIncomeCount === 0`) always renders its header.
+- **Delete stays a true soft-delete, distinct from Hide** — matching the API's own existing
+  design (its DELETE handler's comment: hide is what a user normally wants for "don't use
+  this anymore but keep history"; delete is offered too since it's allowed unconditionally
+  for `spending` categories and soft-delete already preserves the row for historical ledger
+  recomputation either way).
+- **System-managed rows get zero controls, not disabled ones** — a group with `isSystem:
+  true` (the auto-created "Credit Card Payments" group) or a category with `kind !==
+  'spending'` renders name/amounts only, mirroring the API's own `400 system_managed`
+  guardrails rather than offering a button that always fails.
+- No migration — `web/src/types.ts` gained `sortOrder`/`note` (category) and
+  `hiddenAt`/`sortOrder` (group), fields the API already serialized on the wire since PR 4
+  but the frontend never declared.
+
 ---
 
 ## Roadmap

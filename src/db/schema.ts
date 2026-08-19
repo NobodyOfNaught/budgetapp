@@ -144,6 +144,12 @@ export const accounts = sqliteTable(
     // so a repeat import doesn't re-ask; nothing keys off it. See
     // src/import/ for the provider registry.
     importProvider: text('import_provider'),
+    // Per-provider import choices, JSON, e.g. { "members": ["kristine
+    // sandt", "Palle Helenius"] } for Splitwise's "whose expenses belong to
+    // this budget" selection (src/import/splitwise.ts). Written on each
+    // successful import, read back to pre-fill the next one. NULL for
+    // providers with no such choice (Wise, BECU).
+    importOptions: text('import_options'),
     closedAt: integer('closed_at'),
     sortOrder: integer('sort_order').notNull().default(0),
     note: text('note'),

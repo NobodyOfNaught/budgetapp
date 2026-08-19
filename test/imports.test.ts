@@ -391,6 +391,97 @@ describe('payee rules and the generic naming heuristic — provider-agnostic', (
   });
 });
 
+describe('Splitwise: options plumbing', () => {
+  const SPLITWISE_HEADER = 'Date,Description,Category,Cost,Currency,Steve,kristine sandt,Palle Helenius,Katherine Atwill';
+  function splitwiseCsv(...rows: string[]): string {
+    return [SPLITWISE_HEADER, ...rows, ''].join('\n');
+  }
+  const RENT_ROW = '2025-07-01,July rent,Rent,1700.00,USD,0.00,-850.00,-850.00,1700.00';
+  const OUR_TWO = ['kristine sandt', 'Palle Helenius'];
+
+  it('POST /imports/inspect reports the file\'s participants and writes nothing', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('splitwise-inspect@example.com');
+
+    const { status, body } = await callJson<{ participants: string[]; rowCount: number }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/inspect`,
+      { method: 'POST', body: JSON.stringify({ provider: 'splitwise', csv: splitwiseCsv(RENT_ROW) }) },
+    );
+    expect(status).toBe(200);
+    expect(body.participants).toEqual(['Steve', 'kristine sandt', 'Palle Helenius', 'Katherine Atwill']);
+    expect(body.rowCount).toBe(1);
+
+    expect(await review(app, sessionCookie, budgetId)).toEqual([]); // nothing written
+  });
+
+  it('rejects a Splitwise import with no members selected', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('splitwise-no-members@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Splitwise', type: 'checking' });
+
+    const { status, body } = await callJson<{ error: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: account.account.id, provider: 'splitwise', filename: 'sw.csv', csv: splitwiseCsv(RENT_ROW) }),
+    });
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_options');
+    expect(await review(app, sessionCookie, budgetId)).toEqual([]);
+  });
+
+  it('persists the member selection onto the account, and a second import pre-fills it', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('splitwise-remember@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Splitwise', type: 'checking' });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: account.account.id,
+        provider: 'splitwise',
+        filename: 'sw.csv',
+        csv: splitwiseCsv(RENT_ROW),
+        options: { members: OUR_TWO },
+      }),
+    });
+
+    const { body: accountsList } = await callJson<{ accounts: { id: string; importOptions: string | null }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+    );
+    const saved = accountsList.accounts.find((a) => a.id === account.account.id);
+    expect(saved?.importOptions && JSON.parse(saved.importOptions)).toEqual({ members: OUR_TWO });
+  });
+
+  it('imports the net position for the selected members, categorized, and leaves out zero-net rows', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('splitwise-import@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Splitwise', type: 'checking' });
+
+    const { status, body } = await callJson<ImportSummary>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: account.account.id,
+        provider: 'splitwise',
+        filename: 'sw.csv',
+        csv: splitwiseCsv(
+          RENT_ROW, // net -1700 for our pair — Katherine fronted it
+          '2025-08-06,Groceries ,Groceries,107.00,USD,-26.75,-26.75,80.25,-26.75', // net +53.50 — Palle fronted it
+          '2025-07-02,kristine s. paid Palle H.,Payment,1008.35,USD,0.00,1008.35,-1008.35,0.00', // nets to 0 for our pair — skipped
+        ),
+        options: { members: OUR_TWO },
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.imported).toBe(2);
+    expect(body.skipped).toHaveLength(1);
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const rent = rows.find((r) => r.amountMinor === -170000)!;
+    expect(rent.categoryId).not.toBeNull(); // Rent -> Rent/Mortgage
+    const groceryReimbursement = rows.find((r) => r.amountMinor === 5350)!;
+    expect(groceryReimbursement.categoryId).not.toBeNull(); // Groceries -> Groceries
+  });
+});
+
 describe('authorization', () => {
   it('403s list, review, import and undo for a non-member', async () => {
     const { budgetId } = await signInNewUser('import-owner@example.com');
@@ -401,6 +492,14 @@ describe('authorization', () => {
     expect((await importCsv(outsider, outsiderCookie, budgetId, 'x', csv(GIANT_FOOD))).status).toBe(403);
     expect(
       (await callJson(outsider, outsiderCookie, `/api/v1/budgets/${budgetId}/imports/anything`, { method: 'DELETE' })).status,
+    ).toBe(403);
+    expect(
+      (
+        await callJson(outsider, outsiderCookie, `/api/v1/budgets/${budgetId}/imports/inspect`, {
+          method: 'POST',
+          body: JSON.stringify({ provider: 'wise', csv: csv(GIANT_FOOD) }),
+        })
+      ).status,
     ).toBe(403);
   });
 });

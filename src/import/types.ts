@@ -70,7 +70,26 @@ export interface ParseResult {
   currencies: string[];
   /** Raw data-row count (excluding the header), for the batch summary. */
   rowCount: number;
+  /**
+   * Names discovered in the file that `options.members` can select among —
+   * set only by providers whose file has no fixed participant list of its
+   * own (Splitwise's per-person columns; see src/import/splitwise.ts).
+   * Present (even with 0 rows imported) so the UI can offer the choice
+   * BEFORE a real import via POST .../imports/inspect. Undefined for
+   * providers where the concept doesn't apply (Wise, BECU).
+   */
+  participants?: string[];
 }
 
-/** A statement parser: file text in, normalised rows out. Pure. */
-export type StatementParser = (csvText: string) => ParseResult;
+/**
+ * Per-provider import choices — currently just Splitwise's "whose expenses
+ * belong to this budget". Optional and ignored by providers that don't use
+ * it (Wise, BECU), which is what keeps this an additive widening of the
+ * parser signature rather than a breaking one.
+ */
+export interface ImportOptions {
+  members?: string[];
+}
+
+/** A statement parser: file text (plus optional per-provider options) in, normalised rows out. Pure. */
+export type StatementParser = (csvText: string, options?: ImportOptions) => ParseResult;

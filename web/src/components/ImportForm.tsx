@@ -5,7 +5,19 @@ import type { Account, ImportBatch, ImportSummary } from '../types';
 const PROVIDERS: { value: string; label: string }[] = [
   { value: 'wise', label: 'Wise' },
   { value: 'becu', label: 'BECU' },
+  { value: 'splitwise', label: 'Splitwise' },
 ];
+
+/** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
+function savedMembers(account: Account | undefined): string[] {
+  if (!account?.importOptions) return [];
+  try {
+    const parsed = JSON.parse(account.importOptions) as { members?: string[] };
+    return parsed.members ?? [];
+  } catch {
+    return [];
+  }
+}
 
 function formatWhen(epochMs: number): string {
   return new Date(epochMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -48,12 +60,72 @@ export function ImportForm({
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [history, setHistory] = useState<ImportBatch[] | null>(null);
   const [undoingId, setUndoingId] = useState<string | null>(null);
+  // Providers whose file has no fixed participant list of its own
+  // (Splitwise) report who's in it via POST /imports/inspect, so the user
+  // can pick which people's expenses belong to THIS budget before
+  // committing to a real import — see src/import/splitwise.ts.
+  // `participants === null` means "haven't inspected the current file yet"
+  // (or the provider doesn't have this concept); `[]` means "inspected, no
+  // per-person choice to make".
+  const [participants, setParticipants] = useState<string[] | null>(null);
+  const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
+  const [inspecting, setInspecting] = useState(false);
 
   function loadHistory() {
     apiFetch<{ batches: ImportBatch[] }>(`/budgets/${budgetId}/imports`).then((res) => setHistory(res.batches));
   }
 
   useEffect(loadHistory, [budgetId]);
+
+  // Re-inspect whenever the file or provider changes — a wrong-provider
+  // pick (or no file yet) just resets back to "nothing to choose".
+  useEffect(() => {
+    setParticipants(null);
+    setSelectedMembers(new Set());
+    if (!file) return;
+    setInspecting(true);
+    file
+      .text()
+      .then((csvText) => apiFetch<{ participants: string[] }>(`/budgets/${budgetId}/imports/inspect`, {
+        method: 'POST',
+        body: JSON.stringify({ provider, csv: csvText }),
+      }))
+      .then((res) => {
+        setParticipants(res.participants);
+        // Pre-fill from this account's last import, if any of those names
+        // still appear in the file.
+        const remembered = savedMembers(importable.find((a) => a.id === accountId));
+        const stillPresent = remembered.filter((m) => res.participants.includes(m));
+        setSelectedMembers(new Set(stillPresent));
+      })
+      .catch(() => setParticipants([])) // an unparseable file surfaces its real error on submit instead
+      .finally(() => setInspecting(false));
+    // accountId/importable deliberately excluded: switching the account
+    // alone shouldn't re-run inspect, just re-read its saved options (the
+    // account-change effect right below handles that).
+  }, [file, provider, budgetId]);
+
+  // Switching accounts (without changing the file) re-applies THAT
+  // account's remembered selection, so picking through accounts to find
+  // the right one doesn't require re-choosing people each time.
+  useEffect(() => {
+    if (participants === null) return;
+    const remembered = savedMembers(importable.find((a) => a.id === accountId));
+    setSelectedMembers(new Set(remembered.filter((m) => participants.includes(m))));
+    // Only re-run on an explicit account switch — `participants` is read, not depended on, deliberately.
+  }, [accountId]);
+
+  function toggleMember(name: string) {
+    setSelectedMembers((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  const needsMembers = (participants?.length ?? 0) > 0;
+  const canSubmit = !!file && !!accountId && !inspecting && (!needsMembers || selectedMembers.size > 0);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -64,7 +136,13 @@ export function ImportForm({
       const csv = await file.text();
       const result = await apiFetch<ImportSummary>(`/budgets/${budgetId}/imports`, {
         method: 'POST',
-        body: JSON.stringify({ accountId, provider, filename: file.name, csv }),
+        body: JSON.stringify({
+          accountId,
+          provider,
+          filename: file.name,
+          csv,
+          ...(needsMembers ? { options: { members: [...selectedMembers] } } : {}),
+        }),
       });
       setSummary(result);
       onImported(result);
@@ -193,9 +271,21 @@ export function ImportForm({
           <label>
             File <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required />
           </label>
+          {inspecting && <span style={{ color: '#666' }}> Checking file…</span>}
         </div>
+        {needsMembers && participants && (
+          <div style={{ marginBlock: '0.5rem' }}>
+            <p style={{ marginBottom: '0.25rem' }}>Whose expenses belong to this budget?</p>
+            {participants.map((name) => (
+              <label key={name} style={{ display: 'block' }}>
+                <input type="checkbox" checked={selectedMembers.has(name)} onChange={() => toggleMember(name)} /> {name}
+              </label>
+            ))}
+            {selectedMembers.size === 0 && <p style={{ color: '#c0392b', fontSize: '0.9em' }}>Pick at least one person.</p>}
+          </div>
+        )}
         {error && <p style={{ color: 'crimson' }}>{error}</p>}
-        <button type="submit" disabled={submitting || !file}>
+        <button type="submit" disabled={!canSubmit || submitting}>
           {submitting ? 'Importing…' : 'Import'}
         </button>{' '}
         <button type="button" onClick={onCancel}>

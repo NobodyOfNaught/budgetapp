@@ -598,6 +598,56 @@ decision that came out of them:
   doesn't already have) — the normal `uat` → `stg` → `main` path, not the breaking-migration
   exception.
 
+**Splitwise import landed in PR 10** (`src/import/splitwise.ts`,
+`accounts.import_options`), the third import provider and the first that isn't a bank.
+Splitwise tracks shared household expenses (rent, groceries, utilities) among four people;
+two of them share this budget. The file has no account and no balance of its own — every
+row is one shared expense, with a per-person column holding that person's net position
+change (`paid − share`), summing to zero across the row. That shape forced a different
+design than Wise/BECU:
+
+- **The expense and the cash movement are separated**, and naively importing every row as
+  an expense double-counts: rows the budget's own people fronted themselves already arrive
+  through the bank import (Wise/BECU), so counting the Splitwise row too would book the
+  same spend twice. Analysis of the real 284-row export confirmed the shape and the fix —
+  **net position into a dedicated on-budget "Splitwise" clearing account**, not "import each
+  row as an expense": for each row, sum the *selected* members' columns (their combined
+  `paid − share`) and import that single net figure, categorized. Bank transactions are
+  never touched. Where the budget's people fronted the cash, the Splitwise line is
+  *positive* — the roommates' reimbursement — and cancels the portion of the bank charge
+  that wasn't theirs. Reconciled to the cent against the file's own footer:
+  `−32,584.53` (Splitwise rows) `− 4,123.94` (already-counted bank purchases) `=
+  −36,708.47` (the independently-computed true share), and separately, expenses
+  `−32,584.53` + settlements `+32,962.06` = `+377.53` = Palle `360.55` + Kristine `16.98`,
+  the file's own footer.
+- **Settlements import uncategorized on purpose.** A `Payment`-category row or a
+  `Settle all balances` description is debt being paid off, not a new expense — its net
+  cancels the matching (also-uncategorized) bank outflow in Ready to Assign without
+  touching any category. A settlement between two *selected* members nets to zero and is
+  skipped outright — money moving inside the shared budget has no effect on it.
+- **Category mapping is deliberately incomplete** — `Groceries`, `Rent`/`Mortgage`, `Gas/
+  fuel`/`Taxi`, the utility labels, and `Entertainment - Other` map onto seeded category
+  names; `General` (the largest single bucket), `Household supplies`, and `Hotel` are left
+  unmapped rather than guessed. This is exactly what PR 9's `payee_rules` are for — the
+  rules layer already applies above every provider, so a rule like `Pepco` → Utilities
+  reaches Splitwise rows for free.
+- **`ImportOptions { members?: string[] }`** is a new optional parameter threaded through
+  the whole parser pipeline (`StatementParser`, `parseStatement`, the `PARSERS` registry) —
+  additive and backward-compatible, since Wise/BECU simply ignore it. `ParseResult` gained
+  `participants?: string[]` so a provider can report discoverable choices (Splitwise's
+  header names) back to the UI before a real import commits, via a new dry-run
+  **`POST /budgets/:id/imports/inspect`** endpoint that parses and writes nothing.
+  `accounts.import_options` (one nullable JSON column, mirroring the existing
+  `accounts.import_provider`) remembers the last-used selection per account so repeat
+  imports pre-check the same people.
+- **`importId` is deliberately independent of which members are selected**
+  (`date|description|costMinor|occurrence`) — it identifies the Splitwise *row*, not the
+  imported net. Re-importing the same file with a different selection is therefore a no-op;
+  changing the selection means undo, then re-import.
+- Purely additive migration (one nullable column, `accounts.import_options`, that nothing
+  on `main` references) — the normal `uat` → `stg` → `main` path, not the breaking-migration
+  exception.
+
 ---
 
 ## Roadmap
@@ -614,16 +664,20 @@ reads `budget_members`, so this is mostly UI. Activity log from the `revision` s
 Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the same budget
 see each other's edits.
 
-**Phase 4 — Statement import.** *Partially landed in PR 7 and PR 9* — per-provider CSV
-parsers (Wise, then BECU), an approve-imported-transactions queue, idempotent re-import,
-and a provider-agnostic naming heuristic plus user-defined `payee_rules` (see PR 9's notes
-above). Still to come: learned payee→category frequency (rules today are explicit, never
-inferred from history); a column-mapping UI for arbitrary CSVs and per-bank saved mappings;
-then OFX/QFX/QIF (structured, carries FITID); PDF last. Uploads land in R2, parsing runs
-through Queues for anything large. `import_batches` tracks a run; `transactions.import_id`
-makes re-imports idempotent. Transfer detection matches amount and date across accounts and
-links the pair — which, when the two accounts hold different currencies, is precisely the
-cross-currency case below.
+**Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, and PR 10* —
+per-provider CSV parsers (Wise, then BECU, then Splitwise), an approve-imported-transactions
+queue, idempotent re-import, a provider-agnostic naming heuristic plus user-defined
+`payee_rules`, and — new in PR 10 — a non-bank provider modeled as a net-position clearing
+account with per-import member selection (see PR 10's notes above). Still to come: learned
+payee→category frequency (rules today are explicit, never inferred from history); a
+column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
+(structured, carries FITID); PDF last. Uploads land in R2, parsing runs through Queues for
+anything large. `import_batches` tracks a run; `transactions.import_id` makes re-imports
+idempotent. Auto-matching a Splitwise settlement to its bank transaction as a transfer would
+need cross-account amount/date matching — the same machinery this transfer-detection line
+already calls for, so it's deferred here rather than duplicated. Transfer detection matches
+amount and date across accounts and links the pair — which, when the two accounts hold
+different currencies, is precisely the cross-currency case below.
 
 **Phase 5 — Full multi-currency.** Multi-currency accounts in the UI. `budget_amount_minor`
 starts carrying real conversions. Effective rate on a transfer derived from the two legs.

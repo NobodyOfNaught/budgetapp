@@ -1,0 +1,14 @@
+-- Statement import options (PR 10) — one additive, nullable column, safe
+-- under the expand/contract rule (see the plan's "Guarding the shared
+-- production database"). Sits beside accounts.import_provider, which
+-- already exists for exactly this "remember how this account imports"
+-- purpose (0003_import.sql).
+--
+-- Splitwise is the first provider whose import needs a per-import CHOICE
+-- (which people's expenses belong to this budget), not just a fixed parser
+-- — see src/import/splitwise.ts. Persisting the last choice as JSON here
+-- lets the review-and-re-import flow pre-fill the same people next month
+-- instead of re-asking from scratch every time. Nothing keys off this
+-- column existing; a NULL means "no saved options," same as
+-- import_provider being NULL means "not an import account."
+ALTER TABLE accounts ADD COLUMN import_options TEXT;

@@ -42,10 +42,25 @@ function resolveImportPayee(
 // infrastructure with nothing to do.
 const MAX_CSV_BYTES = 2_000_000;
 
+// Per-provider import choices — currently just Splitwise's "whose expenses
+// belong to this budget" (src/import/splitwise.ts's ImportOptions). Kept
+// permissive at the schema level (members is optional here); providers
+// that need it non-empty enforce that themselves below, so a provider that
+// doesn't use options at all is never forced to send this field.
+const importOptionsSchema = z.object({
+  members: z.array(z.string().min(1)).optional(),
+});
+
 const importSchema = z.object({
   accountId: z.string().min(1),
   provider: z.string().min(1),
   filename: z.string().trim().min(1).max(255),
+  csv: z.string().min(1).max(MAX_CSV_BYTES),
+  options: importOptionsSchema.optional(),
+});
+
+const inspectSchema = z.object({
+  provider: z.string().min(1),
   csv: z.string().min(1).max(MAX_CSV_BYTES),
 });
 
@@ -122,6 +137,32 @@ export const importsRoute = new Hono<AppEnv>();
 importsRoute.use('*', requireBudgetMember('viewer'));
 
 importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
+
+/**
+ * Parses a file WITHOUT writing anything, so the UI can show provider-
+ * specific choices (currently: Splitwise's per-person columns) before
+ * committing to a real import. Calling parseStatement with no options is
+ * safe for every provider — Wise/BECU ignore the argument entirely, and
+ * Splitwise itself is inert without a member selection (every row's net
+ * is 0 against an empty selection, so nothing is ever written even if this
+ * result were mistakenly fed to POST / directly).
+ */
+importsRoute.post('/inspect', requireBudgetMember('editor'), async (c) => {
+  const parsed = inspectSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
+  const input = parsed.data;
+
+  if (!isImportProvider(input.provider)) return c.json({ error: 'unknown_provider' }, 400);
+
+  let parseResult;
+  try {
+    parseResult = parseStatement(input.provider, input.csv);
+  } catch {
+    return c.json({ error: 'could_not_parse_file' }, 400);
+  }
+
+  return c.json({ participants: parseResult.participants ?? [], rowCount: parseResult.rowCount });
+});
 
 /**
  * Recent import runs, newest first — what DELETE /:batchId below actually
@@ -241,6 +282,15 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   if (!isImportProvider(input.provider)) return c.json({ error: 'unknown_provider' }, 400);
   const provider = input.provider;
 
+  // Splitwise's file has no fixed participant list of its own — a member
+  // selection is the only thing that says which people's expenses belong
+  // to THIS budget. Importing with none selected would write nothing
+  // silently (every row's net is 0), which is worse than rejecting it
+  // outright — see src/import/splitwise.ts.
+  if (provider === 'splitwise' && (input.options?.members?.length ?? 0) === 0) {
+    return c.json({ error: 'invalid_options' }, 400);
+  }
+
   const db = getDb(c.env);
   const [budget] = await db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1);
   if (!budget) return c.json({ error: 'not_found' }, 404);
@@ -254,7 +304,7 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
 
   let parseResult;
   try {
-    parseResult = parseStatement(provider, input.csv);
+    parseResult = parseStatement(provider, input.csv, input.options);
   } catch {
     return c.json({ error: 'could_not_parse_file' }, 400);
   }
@@ -394,6 +444,16 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     skippedCount: parseResult.skipped.length,
     createdAt: now,
   });
+
+  // Remembered so the next import against this account pre-fills the same
+  // choice instead of re-asking from scratch — see migrations/0006 and
+  // web/src/components/ImportForm.tsx.
+  if (input.options) {
+    await db
+      .update(accounts)
+      .set({ importOptions: JSON.stringify(input.options), updatedAt: now })
+      .where(eq(accounts.id, primaryAccount.id));
+  }
 
   return c.json(
     {

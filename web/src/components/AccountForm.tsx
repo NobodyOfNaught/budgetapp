@@ -100,6 +100,7 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
             <option value="">(none — manual entry)</option>
             <option value="wise">Wise</option>
             <option value="becu">BECU</option>
+            <option value="splitwise">Splitwise</option>
           </select>
         </label>
       </div>

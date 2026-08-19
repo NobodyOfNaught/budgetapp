@@ -45,6 +45,9 @@ export interface Account {
   note: string | null;
   closedAt: number | null;
   sortOrder: number;
+  importProvider: string | null;
+  /** JSON string of ImportOptions (e.g. `{"members":[...]}`), remembered from the account's last import — see ImportForm.tsx. */
+  importOptions: string | null;
 }
 
 export type CategoryKind = 'spending' | 'credit_card_payment' | 'income';

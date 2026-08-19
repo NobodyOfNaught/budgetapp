@@ -163,6 +163,19 @@ export interface ImportSummary {
   accountsCreated: string[];
 }
 
+/** One past import run — GET .../imports. What DELETE .../imports/:batchId undoes. */
+export interface ImportBatch {
+  id: string;
+  accountId: string;
+  accountName: string;
+  provider: string;
+  filename: string;
+  rowCount: number;
+  importedCount: number;
+  skippedCount: number;
+  createdAt: number;
+}
+
 /** One row awaiting review — imported but not yet approved. */
 export interface ReviewTransaction {
   id: string;

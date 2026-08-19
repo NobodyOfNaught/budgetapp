@@ -151,6 +151,14 @@ export function Budget({ budgetId }: { budgetId: string }) {
               reloadAccounts();
               reloadUnapproved();
             }}
+            onUndone={() => {
+              // Same two things change in reverse: an undo can leave an
+              // auto-created currency account behind (empty, but still
+              // there — see src/routes/imports.ts's DELETE handler) and
+              // always removes rows from the review queue.
+              reloadAccounts();
+              reloadUnapproved();
+            }}
             onCancel={() => {
               setShowImportForm(false);
               setView({ kind: 'review' });

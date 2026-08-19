@@ -124,6 +124,38 @@ importsRoute.use('*', requireBudgetMember('viewer'));
 importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
 
 /**
+ * Recent import runs, newest first — what DELETE /:batchId below actually
+ * targets. Exists so a mistaken import (wrong account picked, wrong file)
+ * can be found and undone from the UI at any point afterward, not only in
+ * the one-time summary shown right after POST / — that summary disappears
+ * the moment the user navigates away, which is exactly when a mistake is
+ * often first noticed.
+ */
+importsRoute.get('/', async (c) => {
+  const budgetId = budgetIdParam(c);
+  const db = getDb(c.env);
+
+  const rows = await db
+    .select({
+      id: importBatches.id,
+      accountId: importBatches.accountId,
+      accountName: accounts.name,
+      provider: importBatches.provider,
+      filename: importBatches.filename,
+      rowCount: importBatches.rowCount,
+      importedCount: importBatches.importedCount,
+      skippedCount: importBatches.skippedCount,
+      createdAt: importBatches.createdAt,
+    })
+    .from(importBatches)
+    .innerJoin(accounts, eq(accounts.id, importBatches.accountId))
+    .where(and(eq(importBatches.budgetId, budgetId), isNull(importBatches.deletedAt)))
+    .orderBy(desc(importBatches.createdAt));
+
+  return c.json({ batches: rows });
+});
+
+/**
  * The review queue: everything imported but not yet approved, across every
  * account in the budget. Ordered newest-first because that's what a user
  * catching up on an import wants to see.

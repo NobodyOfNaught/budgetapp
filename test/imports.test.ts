@@ -228,6 +228,33 @@ describe('PATCH /imports/review', () => {
   });
 });
 
+describe('GET /imports', () => {
+  it('lists past import runs, newest first, and excludes an undone batch', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-history@example.com');
+    const wise = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    const cash = await createAccount(app, sessionCookie, budgetId, { name: 'Cash', type: 'checking' });
+
+    const { body: first } = await importCsv(app, sessionCookie, budgetId, cash.account.id, csv(GIANT_FOOD));
+    const { body: second } = await importCsv(app, sessionCookie, budgetId, wise.account.id, csv(SPLIT_CAD, SPLIT_USD));
+
+    const { status, body } = await callJson<{ batches: { id: string; accountName: string; filename: string; importedCount: number }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports`,
+    );
+    expect(status).toBe(200);
+    expect(body.batches.map((b) => b.id)).toEqual([second.batchId, first.batchId]); // newest first
+    expect(body.batches.find((b) => b.id === first.batchId)?.accountName).toBe('Cash');
+    // SPLIT_CAD + SPLIT_USD import as one purchase plus one conversion transfer.
+    expect(body.batches.find((b) => b.id === second.batchId)?.importedCount).toBe(2);
+
+    // Undo the mistaken one — it drops out of the list, the other stays.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/${first.batchId}`, { method: 'DELETE' });
+    const { body: after } = await callJson<{ batches: { id: string }[] }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`);
+    expect(after.batches.map((b) => b.id)).toEqual([second.batchId]);
+  });
+});
+
 describe('DELETE /imports/:batchId', () => {
   it('undoes the whole import', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('import-undo@example.com');
@@ -343,10 +370,11 @@ describe('payee rules and the generic naming heuristic — provider-agnostic', (
 });
 
 describe('authorization', () => {
-  it('403s import, review and undo for a non-member', async () => {
+  it('403s list, review, import and undo for a non-member', async () => {
     const { budgetId } = await signInNewUser('import-owner@example.com');
     const { app: outsider, sessionCookie: outsiderCookie } = await signInNewUser('import-outsider@example.com');
 
+    expect((await callJson(outsider, outsiderCookie, `/api/v1/budgets/${budgetId}/imports`)).status).toBe(403);
     expect((await callJson(outsider, outsiderCookie, `/api/v1/budgets/${budgetId}/imports/review`)).status).toBe(403);
     expect((await importCsv(outsider, outsiderCookie, budgetId, 'x', csv(GIANT_FOOD))).status).toBe(403);
     expect(

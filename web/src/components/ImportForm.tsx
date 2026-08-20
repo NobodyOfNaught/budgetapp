@@ -7,6 +7,7 @@ const PROVIDERS: { value: string; label: string }[] = [
   { value: 'becu', label: 'BECU' },
   { value: 'splitwise', label: 'Splitwise' },
   { value: 'aacu', label: 'AACU' },
+  { value: 'neo', label: 'Neo Mastercard' },
 ];
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
@@ -22,6 +23,11 @@ function savedMembers(account: Account | undefined): string[] {
 
 function formatWhen(epochMs: number): string {
   return new Date(epochMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** Micros (accounts.fxRateMicros) back to a plain decimal string for the input field, e.g. 730000 -> "0.73". */
+function formatFxRate(micros: number): string {
+  return (micros / 1_000_000).toString();
 }
 
 /**
@@ -40,12 +46,14 @@ function formatWhen(epochMs: number): string {
 export function ImportForm({
   budgetId,
   accounts,
+  budgetCurrencyCode,
   onImported,
   onUndone,
   onCancel,
 }: {
   budgetId: string;
   accounts: Account[];
+  budgetCurrencyCode: string;
   /** Called after a successful import so the caller can refresh accounts and the review queue. */
   onImported: (summary: ImportSummary) => void;
   /** Called after a successful undo, for the same reason. */
@@ -56,6 +64,7 @@ export function ImportForm({
   const [accountId, setAccountId] = useState(importable[0]?.id ?? '');
   const [provider, setProvider] = useState('wise');
   const [file, setFile] = useState<File | null>(null);
+  const [fxRate, setFxRate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
@@ -116,6 +125,16 @@ export function ImportForm({
     // Only re-run on an explicit account switch — `participants` is read, not depended on, deliberately.
   }, [accountId]);
 
+  // Pre-fill the exchange-rate field from whatever this account already
+  // has on file (accounts.fxRateMicros — migrations/0007), so a repeat
+  // import doesn't require retyping it. Runs on account switch — like the
+  // members effect above, `importable` is deliberately not a dependency
+  // (it's recreated every render; keying on accountId alone is enough).
+  useEffect(() => {
+    const account = importable.find((a) => a.id === accountId);
+    setFxRate(account?.fxRateMicros != null ? formatFxRate(account.fxRateMicros) : '');
+  }, [accountId]);
+
   function toggleMember(name: string) {
     setSelectedMembers((prev) => {
       const next = new Set(prev);
@@ -126,7 +145,15 @@ export function ImportForm({
   }
 
   const needsMembers = (participants?.length ?? 0) > 0;
-  const canSubmit = !!file && !!accountId && !inspecting && (!needsMembers || selectedMembers.size > 0);
+  const selectedAccount = importable.find((a) => a.id === accountId);
+  const isForeignAccount = !!selectedAccount && selectedAccount.currencyCode !== budgetCurrencyCode;
+  // Only truly BLOCKS submit when the account is already on-budget and has
+  // no rate anywhere (typed here or remembered) — the exact case the API
+  // 400s on (missing_fx_rate). A foreign account that's still off-budget
+  // can import without one; it just won't convert into categories.
+  const fxRateRequired = isForeignAccount && selectedAccount!.onBudget && selectedAccount!.fxRateMicros === null;
+  const canSubmit =
+    !!file && !!accountId && !inspecting && (!needsMembers || selectedMembers.size > 0) && (!fxRateRequired || !!fxRate.trim());
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -143,6 +170,7 @@ export function ImportForm({
           filename: file.name,
           csv,
           ...(needsMembers ? { options: { members: [...selectedMembers] } } : {}),
+          ...(isForeignAccount && fxRate.trim() ? { fxRate: fxRate.trim() } : {}),
         }),
       });
       setSummary(result);
@@ -274,6 +302,25 @@ export function ImportForm({
           </label>
           {inspecting && <span style={{ color: '#666' }}> Checking file…</span>}
         </div>
+        {isForeignAccount && (
+          <div style={{ marginBlock: '0.5rem' }}>
+            <label>
+              Exchange rate (1 {selectedAccount!.currencyCode} = ? {budgetCurrencyCode}){' '}
+              <input
+                value={fxRate}
+                onChange={(e) => setFxRate(e.target.value)}
+                placeholder="e.g. 0.73"
+                inputMode="decimal"
+                style={{ width: '6rem' }}
+              />
+            </label>
+            {fxRateRequired && !fxRate.trim() && (
+              <p style={{ color: '#c0392b', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+                This account is budgeted in {budgetCurrencyCode} — a rate is needed to convert these charges.
+              </p>
+            )}
+          </div>
+        )}
         {needsMembers && participants && (
           <div style={{ marginBlock: '0.5rem' }}>
             <p style={{ marginBottom: '0.25rem' }}>Whose expenses belong to this budget?</p>

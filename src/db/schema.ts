@@ -150,6 +150,13 @@ export const accounts = sqliteTable(
     // successful import, read back to pre-fill the next one. NULL for
     // providers with no such choice (Wise, BECU).
     importOptions: text('import_options'),
+    // Budget-currency-per-1-unit-of-account-currency, x1,000,000 (0.73
+    // USD/CAD -> 730000). Lets a foreign-currency account be on-budget: see
+    // src/routes/accounts.ts's onBudget logic and src/lib/money.ts's
+    // convertToBudgetMinor. NULL for a same-currency account (rate is
+    // meaningless there) or a foreign account with no rate supplied yet
+    // (which stays off-budget until one is).
+    fxRateMicros: integer('fx_rate_micros'),
     closedAt: integer('closed_at'),
     sortOrder: integer('sort_order').notNull().default(0),
     note: text('note'),

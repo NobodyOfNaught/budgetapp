@@ -12,11 +12,22 @@ const ACCOUNT_TYPES: { value: AccountType; label: string }[] = [
   { value: 'tracking_liability', label: 'Tracking — Liability' },
 ];
 
-export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: string; onCreated: () => void; onCancel: () => void }) {
+export function AccountForm({
+  budgetId,
+  budgetCurrencyCode,
+  onCreated,
+  onCancel,
+}: {
+  budgetId: string;
+  budgetCurrencyCode: string;
+  onCreated: () => void;
+  onCancel: () => void;
+}) {
   const [name, setName] = useState('');
   const [type, setType] = useState<AccountType>('checking');
   const [startingBalance, setStartingBalance] = useState('');
   const [currencyCode, setCurrencyCode] = useState('');
+  const [fxRate, setFxRate] = useState('');
   const [importProvider, setImportProvider] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +44,7 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
           type,
           startingBalance: startingBalance.trim() || undefined,
           currencyCode: currencyCode.trim() || undefined,
+          fxRate: fxRate.trim() || undefined,
           importProvider: importProvider || undefined,
         }),
       });
@@ -86,13 +98,26 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
             style={{ width: '5rem' }}
           />
         </label>
-        {currencyCode.length === 3 && (
+        {currencyCode.length === 3 && currencyCode !== budgetCurrencyCode && (
           <span style={{ color: '#666', fontSize: '0.9em' }}>
             {' '}
-            — a currency other than your budget&apos;s is tracked but stays out of category budgeting.
+            — a currency other than your budget&apos;s stays out of category budgeting unless you give it an exchange
+            rate below.
           </span>
         )}
       </div>
+      {currencyCode.length === 3 && currencyCode !== budgetCurrencyCode && (
+        <div>
+          <label>
+            Exchange rate (1 {currencyCode} = ? {budgetCurrencyCode}){' '}
+            <input value={fxRate} onChange={(e) => setFxRate(e.target.value)} placeholder="e.g. 0.73" inputMode="decimal" style={{ width: '6rem' }} />
+          </label>
+          <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+            Supplying a rate makes this account budgetable like any other — charges convert into your categories.
+            Leave it blank to just track the balance instead.
+          </p>
+        </div>
+      )}
       <div>
         <label>
           Statement files from{' '}
@@ -102,6 +127,7 @@ export function AccountForm({ budgetId, onCreated, onCancel }: { budgetId: strin
             <option value="becu">BECU</option>
             <option value="splitwise">Splitwise</option>
             <option value="aacu">AACU</option>
+            <option value="neo">Neo Mastercard</option>
           </select>
         </label>
       </div>

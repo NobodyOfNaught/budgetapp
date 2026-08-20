@@ -48,6 +48,8 @@ export interface Account {
   importProvider: string | null;
   /** JSON string of ImportOptions (e.g. `{"members":[...]}`), remembered from the account's last import — see ImportForm.tsx. */
   importOptions: string | null;
+  /** Budget-currency-per-1-unit-of-account-currency, x1,000,000 — null means no rate on file. See AccountForm.tsx/ImportForm.tsx. */
+  fxRateMicros: number | null;
 }
 
 export type CategoryKind = 'spending' | 'credit_card_payment' | 'income';

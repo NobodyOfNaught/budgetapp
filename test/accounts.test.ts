@@ -156,6 +156,135 @@ describe('PATCH /api/v1/budgets/:budgetId/accounts/:accountId', () => {
   });
 });
 
+// PR 15: a foreign-currency account is forced off-budget UNLESS it has an
+// exchange rate — see src/routes/accounts.ts's isBudgetable. These are a
+// regression guard for every account that predates this PR (including the
+// Wise-imported CAD sub-account, which has never had a rate and must stay
+// exactly as off-budget as before).
+describe('foreign currency + exchange rate', () => {
+  it('a foreign-currency account with a rate is on-budget', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-onbudget@example.com');
+    const { status, body } = await callJson<{
+      account: { onBudget: boolean; fxRateMicros: number | null };
+      forcedOffBudget: boolean;
+    }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }),
+    });
+    expect(status).toBe(201);
+    expect(body.account.onBudget).toBe(true);
+    expect(body.account.fxRateMicros).toBe(730000);
+    expect(body.forcedOffBudget).toBe(false);
+  });
+
+  it('a foreign-currency account with no rate stays off-budget — the pre-PR-15 default, unchanged', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-offbudget@example.com');
+    const { body } = await callJson<{ account: { onBudget: boolean; fxRateMicros: number | null }; forcedOffBudget: boolean }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Wise (CAD)', type: 'checking', currencyCode: 'CAD' }) },
+    );
+    expect(body.account.onBudget).toBe(false);
+    expect(body.account.fxRateMicros).toBeNull();
+    expect(body.forcedOffBudget).toBe(true);
+  });
+
+  it('rejects an invalid exchange rate', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-invalid@example.com');
+    for (const bad of ['0', '-0.73', 'abc', '1001']) {
+      const { status, body } = await callJson<{ error: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+        method: 'POST',
+        body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: bad }),
+      });
+      expect(status).toBe(400);
+      expect(body.error).toBe('invalid_fx_rate');
+    }
+  });
+
+  it('a foreign starting balance converts to budget_amount_minor via the rate, leaving amount_minor native', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-starting@example.com');
+    const { body } = await callJson<{ account: { id: string } }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Neo',
+        type: 'credit_card',
+        currencyCode: 'CAD',
+        fxRate: '0.73',
+        startingBalance: '-100.00',
+      }),
+    });
+
+    const row = await env.DB.prepare('select amount_minor, budget_amount_minor from transactions where account_id = ?')
+      .bind(body.account.id)
+      .first<{ amount_minor: number; budget_amount_minor: number }>();
+    expect(row?.amount_minor).toBe(-10000); // native CAD
+    expect(row?.budget_amount_minor).toBe(-7300); // converted at 0.73
+  });
+
+  it('PATCH updates the remembered rate without retroactively changing onBudget', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-rate@example.com');
+    const { body: created } = await callJson<{ account: { id: string; onBudget: boolean } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }) },
+    );
+
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fxRate: '0.75' }),
+    });
+    expect(status).toBe(200);
+
+    const row = await env.DB.prepare('select fx_rate_micros, on_budget from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ fx_rate_micros: number | null; on_budget: number }>();
+    expect(row?.fx_rate_micros).toBe(750000);
+    expect(row?.on_budget).toBe(1); // unchanged — PATCH never recomputes onBudget
+  });
+
+  it('PATCH clears the rate with fxRate: null, again leaving onBudget untouched', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-clear@example.com');
+    const { body: created } = await callJson<{ account: { id: string } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }) },
+    );
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fxRate: null }),
+    });
+
+    const row = await env.DB.prepare('select fx_rate_micros, on_budget from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ fx_rate_micros: number | null; on_budget: number }>();
+    expect(row?.fx_rate_micros).toBeNull();
+    expect(row?.on_budget).toBe(1); // still on-budget — the account this leaves in the "needs a rate again" state that imports.ts's missing_fx_rate guard exists for, see test/imports.test.ts
+  });
+
+  it('PATCH rejects an invalid exchange rate', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-invalid@example.com');
+    const { body: created } = await callJson<{ account: { id: string } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD' }) },
+    );
+
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`,
+      { method: 'PATCH', body: JSON.stringify({ fxRate: 'not-a-number' }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_fx_rate');
+  });
+});
+
 // Sanity check that call()/req() still behave with no cookie at all.
 describe('unauthenticated access', () => {
   it('401s without a session', async () => {

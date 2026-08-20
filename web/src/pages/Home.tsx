@@ -53,7 +53,7 @@ export function Home() {
             Budget: <strong>{primaryBudget.name}</strong> ({primaryBudget.currencyCode}) — role:{' '}
             {primaryBudget.role}
           </p>
-          <Budget budgetId={primaryBudget.id} />
+          <Budget budgetId={primaryBudget.id} budgetCurrencyCode={primaryBudget.currencyCode} />
         </>
       ) : (
         <p>No budget yet.</p>

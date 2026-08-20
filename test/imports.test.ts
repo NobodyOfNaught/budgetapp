@@ -25,6 +25,14 @@ const BOUNCED =
   'TRANSFER-2247430954,REFUNDED,OUT,"2026-07-13 15:13:30","2026-07-21 07:28:57",1.41,USD,,,' +
   '"Palle Helenius",3.54,USD,"Palle Helenius",5.0,CAD,1.41395,,,"Palle Helenius",General,';
 
+// A single-currency CAD purchase (source and target both CAD, unlike
+// SPLIT_CAD/SPLIT_USD above) — used to exercise budgetAmountMinor
+// conversion on a foreign primary account (PR 15), since a mismatched
+// currency here would instead take the resolveCurrencyAccount branch.
+const TIM_HORTONS_CAD =
+  '"CARD_TRANSACTION-9000000001",COMPLETED,OUT,"2026-08-05 08:00:00","2026-08-05 08:00:00",0.00,CAD,,,' +
+  '"Palle Helenius",100.00,CAD,"Tim Hortons",100.00,CAD,1.0000000000000000,,,"Palle Helenius",Groceries,';
+
 function csv(...rows: string[]): string {
   return [HEADER, ...rows, ''].join('\n');
 }
@@ -52,7 +60,10 @@ interface ReviewRow {
 }
 
 async function createAccount(app: App, cookie: string, budgetId: string, body: Record<string, unknown>) {
-  const { body: res } = await callJson<{ account: { id: string; currencyCode: string; onBudget: boolean }; forcedOffBudget: boolean }>(
+  const { body: res } = await callJson<{
+    account: { id: string; currencyCode: string; onBudget: boolean; fxRateMicros: number | null };
+    forcedOffBudget: boolean;
+  }>(
     app,
     cookie,
     `/api/v1/budgets/${budgetId}/accounts`,
@@ -61,10 +72,10 @@ async function createAccount(app: App, cookie: string, budgetId: string, body: R
   return res;
 }
 
-async function importCsv(app: App, cookie: string, budgetId: string, accountId: string, text: string) {
+async function importCsv(app: App, cookie: string, budgetId: string, accountId: string, text: string, extra: Record<string, unknown> = {}) {
   return callJson<ImportSummary>(app, cookie, `/api/v1/budgets/${budgetId}/imports`, {
     method: 'POST',
-    body: JSON.stringify({ accountId, provider: 'wise', filename: 'statement.csv', csv: text }),
+    body: JSON.stringify({ accountId, provider: 'wise', filename: 'statement.csv', csv: text, ...extra }),
   });
 }
 
@@ -181,6 +192,104 @@ describe('foreign-currency accounts', () => {
     const created = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking', currencyCode: 'USD' });
     expect(created.account.onBudget).toBe(true);
     expect(created.forcedOffBudget).toBe(false);
+  });
+});
+
+// PR 15: a foreign-currency account with a rate is budgetable, and its
+// imported rows must carry a real converted budgetAmountMinor rather than
+// the native-currency fallback that was safe only while foreign accounts
+// were unconditionally off-budget — see src/routes/imports.ts.
+describe('budgetable foreign-currency import', () => {
+  it('converts budgetAmountMinor using the supplied rate — native and budget currency disagree', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-fx-convert@example.com');
+    const created = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Neo',
+      type: 'credit_card',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    expect(created.account.onBudget).toBe(true);
+    expect(created.forcedOffBudget).toBe(false);
+
+    const { status, body } = await importCsv(app, sessionCookie, budgetId, created.account.id, csv(TIM_HORTONS_CAD));
+    expect(status).toBe(201);
+    expect(body.imported).toBe(1);
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const row = rows.find((r) => r.payeeName === 'Tim Hortons')!;
+    expect(row.currencyCode).toBe('CAD');
+    expect(row.amountMinor).toBe(-10000); // native: -100.00 CAD, unconverted
+
+    // Approve it into a spending category and check the budget-currency
+    // (USD) side through the month view — the only place budgetAmountMinor
+    // surfaces, since the register always shows native currency.
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const groceries = cats.groups.flatMap((g) => g.categories).find((c) => c.kind === 'spending')!;
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/review`, {
+      method: 'PATCH',
+      body: JSON.stringify({ updates: [{ transactionId: row.id, categoryId: groceries.id, approved: true }] }),
+    });
+
+    const { body: month } = await callJson<{ categories: Record<string, { activity: number }> }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/months/2026-08`,
+    );
+    // -100.00 CAD * 0.73 = -73.00 USD -> -7300 minor, not the native -10000.
+    expect(month.categories[groceries.id]?.activity).toBe(-7300);
+  });
+
+  it('400s missing_fx_rate when an on-budget foreign account has no rate to use', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-fx-missing@example.com');
+    const created = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Neo',
+      type: 'credit_card',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    expect(created.account.onBudget).toBe(true);
+
+    // Clear the rate without touching onBudget — PATCH deliberately doesn't
+    // recompute it retroactively (see src/routes/accounts.ts), which is
+    // exactly the state that must be blocked at import time: an on-budget
+    // account with nothing honest to convert with.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fxRate: null }),
+    });
+
+    const { status, body } = await importCsv(app, sessionCookie, budgetId, created.account.id, csv(TIM_HORTONS_CAD));
+    expect(status).toBe(400);
+    expect((body as unknown as { error: string }).error).toBe('missing_fx_rate');
+    expect(await review(app, sessionCookie, budgetId)).toEqual([]); // nothing written
+  });
+
+  it('remembers a per-import rate onto the account for next time', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-fx-remember@example.com');
+    // No rate at creation — an existing tracking-only CAD account, like a
+    // Wise sub-account, that the user now wants to budget going forward.
+    const created = await createAccount(app, sessionCookie, budgetId, { name: 'Neo', type: 'credit_card', currencyCode: 'CAD' });
+    expect(created.account.onBudget).toBe(false); // no rate yet, so still off-budget
+
+    // The account stays off-budget (PATCH never recomputes that — see
+    // src/routes/accounts.ts), so imports.ts's missing_fx_rate guard,
+    // which only fires for an on-budget account, doesn't apply here. The
+    // import goes through on the supplied rate alone, and that rate must
+    // still be persisted as the account's new default.
+    const { status } = await importCsv(app, sessionCookie, budgetId, created.account.id, csv(TIM_HORTONS_CAD), { fxRate: '0.80' });
+    expect(status).toBe(201);
+
+    const { body: accountsList } = await callJson<{ accounts: { id: string; fxRateMicros: number | null }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+    );
+    const saved = accountsList.accounts.find((a) => a.id === created.account.id);
+    expect(saved?.fxRateMicros).toBe(800000); // the supplied 0.80, not the account's earlier 0.73
   });
 });
 

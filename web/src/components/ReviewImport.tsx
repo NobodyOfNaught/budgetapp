@@ -27,10 +27,20 @@ function amountColor(minor: number): string {
 export function ReviewImport({
   budgetId,
   categoryGroups,
+  refreshToken,
   onChanged,
 }: {
   budgetId: string;
   categoryGroups: CategoryGroup[];
+  /**
+   * Bumped by the caller after an import lands. Needed because Budget.tsx
+   * only mounts this component while its own view is 'review' — importing
+   * a file while that tab is ALREADY open (not navigating to it fresh)
+   * doesn't remount ReviewImport, so without this the table would keep
+   * showing whatever it fetched on its last mount. See Budget.tsx's
+   * reviewVersion.
+   */
+  refreshToken: number;
   /** Bumped after approvals so the caller can refresh its unapproved-count badge. */
   onChanged: () => void;
 }) {
@@ -56,7 +66,7 @@ export function ReviewImport({
     });
   }
 
-  useEffect(reload, [budgetId]);
+  useEffect(reload, [budgetId, refreshToken]);
 
   const assignable = categoryGroups.flatMap((g) =>
     g.categories.filter((c) => c.kind !== 'income' && !c.hiddenAt).map((c) => ({ id: c.id, name: c.name, groupName: g.name })),

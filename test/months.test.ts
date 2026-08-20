@@ -184,6 +184,65 @@ describe('PUT .../months/:month/assignments', () => {
     expect(after.categories[paymentCat.id]?.available).toBe(0); // covered
   });
 
+  // PR 15: proves ledger.ts needed zero changes to support a budgetable
+  // foreign-currency credit card — it already reads budgetAmountMinor
+  // exclusively (see src/domain/ledger.ts's accumulateMonth). The row
+  // under test gets its budgetAmountMinor from a real statement import
+  // (src/routes/imports.ts), which is where the PR 15 conversion work
+  // actually lives; this test is purely about what the ledger engine does
+  // with a correctly-converted row once it exists.
+  it('a budgeted CAD credit card: a categorized charge moves the USD category and earmarks the payment category, both converted', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('months-fx-ledger@example.com');
+    const { body: created } = await callJson<{ account: { id: string; onBudget: boolean } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }) },
+    );
+    expect(created.account.onBudget).toBe(true);
+
+    const wiseHeader =
+      'ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency",' +
+      '"Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency",' +
+      '"Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,' +
+      '"Created by",Category,Note';
+    const timHortonsCad =
+      '"CARD_TRANSACTION-9100000001",COMPLETED,OUT,"2026-03-05 08:00:00","2026-03-05 08:00:00",0.00,CAD,,,' +
+      '"Palle Helenius",100.00,CAD,"Tim Hortons",100.00,CAD,1.0000000000000000,,,"Palle Helenius",Groceries,';
+    const wiseCsv = [wiseHeader, timHortonsCad, ''].join('\n');
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: created.account.id, provider: 'wise', filename: 'neo.csv', csv: wiseCsv }),
+    });
+
+    const [groceries] = await spendingCategoryIds(app, sessionCookie, budgetId);
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string; linkedAccountId: string | null }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const paymentCat = cats.groups.flatMap((g) => g.categories).find((c) => c.linkedAccountId === created.account.id)!;
+
+    const { body: review } = await callJson<{ transactions: { id: string; payeeName: string | null }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/review`,
+    );
+    const row = review.transactions.find((r) => r.payeeName === 'Tim Hortons')!;
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/review`, {
+      method: 'PATCH',
+      body: JSON.stringify({ updates: [{ transactionId: row.id, categoryId: groceries!.id, approved: true }] }),
+    });
+
+    const { body: month } = await callJson<MonthView>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03`);
+    // -100.00 CAD * 0.73 = -73.00 USD -> -7300 minor.
+    expect(month.categories[groceries!.id]?.activity).toBe(-7300);
+    // Credit-card earmark: the opposite sign, in the same converted amount.
+    expect(month.categories[paymentCat.id]?.activity).toBe(7300);
+    expect(month.categories[paymentCat.id]?.available).toBe(7300); // no assignment yet, carryover 0
+  });
+
   it('rejects assigning to a category from a different budget', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('months-foreign-cat@example.com');
     const { app: otherApp, sessionCookie: otherCookie, budgetId: otherBudgetId } = await signInNewUser(

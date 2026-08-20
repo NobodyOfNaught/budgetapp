@@ -11,6 +11,7 @@ import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName
 import { cleanPayeeName } from '../import/payee-name';
 import { matchPayeeRule, type PayeeRule } from '../import/rules';
 import { ulid } from '../lib/ids';
+import { convertToBudgetMinor, parseFxRateToMicros } from '../lib/money';
 import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
 
@@ -57,6 +58,12 @@ const importSchema = z.object({
   filename: z.string().trim().min(1).max(255),
   csv: z.string().min(1).max(MAX_CSV_BYTES),
   options: importOptionsSchema.optional(),
+  // Budget-currency-per-1-unit-of-account-currency, e.g. "0.73" — an
+  // account property, not a parser choice (unlike `options` above), so it
+  // sits at the top level and is remembered on accounts.fxRateMicros
+  // directly rather than inside the importOptions JSON blob. See
+  // src/routes/accounts.ts's fxRate handling, which this mirrors.
+  fxRate: z.string().trim().optional(),
 });
 
 const inspectSchema = z.object({
@@ -296,11 +303,43 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   if (!budget) return c.json({ error: 'not_found' }, 404);
 
   const [primaryAccount] = await db
-    .select({ id: accounts.id, name: accounts.name, currencyCode: accounts.currencyCode, importProvider: accounts.importProvider })
+    .select({
+      id: accounts.id,
+      name: accounts.name,
+      currencyCode: accounts.currencyCode,
+      importProvider: accounts.importProvider,
+      onBudget: accounts.onBudget,
+      fxRateMicros: accounts.fxRateMicros,
+    })
     .from(accounts)
     .where(and(eq(accounts.id, input.accountId), eq(accounts.budgetId, budgetId), isNull(accounts.deletedAt)))
     .limit(1);
   if (!primaryAccount) return c.json({ error: 'invalid_account' }, 400);
+
+  // A rate typed in for THIS import overrides (and, below, updates) the
+  // one remembered on the account; otherwise fall back to that remembered
+  // rate. Only meaningful when the account's own currency differs from the
+  // budget's — see src/routes/accounts.ts's identical fxRate handling,
+  // which this mirrors rather than reimplements independently.
+  let suppliedFxRateMicros: number | undefined;
+  if (input.fxRate !== undefined) {
+    try {
+      suppliedFxRateMicros = parseFxRateToMicros(input.fxRate);
+    } catch {
+      return c.json({ error: 'invalid_fx_rate' }, 400);
+    }
+  }
+  const isPrimaryForeign = primaryAccount.currencyCode !== budget.currencyCode;
+  const effectiveFxRateMicros = suppliedFxRateMicros ?? primaryAccount.fxRateMicros ?? undefined;
+  // An on-budget foreign account with no rate anywhere shouldn't be
+  // reachable (account creation requires one to go on-budget in the first
+  // place — see src/routes/accounts.ts) but is checked explicitly rather
+  // than assumed, since a rate can be cleared later via PATCH. Never fall
+  // back to native-as-budget here — that's the exact bug this PR exists
+  // to close.
+  if (isPrimaryForeign && primaryAccount.onBudget && effectiveFxRateMicros === undefined) {
+    return c.json({ error: 'missing_fx_rate' }, 400);
+  }
 
   let parseResult;
   try {
@@ -371,11 +410,21 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
           date: row.date,
           amountMinor: row.amountMinor,
           currencyCode: row.currencyCode,
-          // Equal to amountMinor by definition when the account is in the
-          // budget's currency. For a foreign account it is NOT a real
-          // conversion — but such accounts are off-budget, so this value
-          // never reaches the ledger's sums (see src/routes/accounts.ts).
-          budgetAmountMinor: row.amountMinor,
+          // Equal to amountMinor when the account is in the budget's
+          // currency. For the PRIMARY account (the one the user is
+          // importing into) in a foreign currency, converts via
+          // effectiveFxRateMicros — real money, so it reaches the ledger's
+          // sums whenever this account is on-budget (see
+          // src/routes/accounts.ts's PR 15 notes). A secondary
+          // currency sub-account auto-created by resolveCurrencyAccount
+          // (Wise's multi-balance case) is untouched here — it's always
+          // off-budget, so an unconverted value never reaches category
+          // math; only net worth reads it, an existing, separate
+          // imprecision this PR doesn't extend to.
+          budgetAmountMinor:
+            account.id === primaryAccount.id && isPrimaryForeign && effectiveFxRateMicros !== undefined
+              ? convertToBudgetMinor(row.amountMinor, effectiveFxRateMicros)
+              : row.amountMinor,
           categoryId,
           payeeId,
           memo: row.memo,
@@ -447,12 +496,14 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
 
   // Remembered so the next import against this account pre-fills the same
   // choice instead of re-asking from scratch — see migrations/0006 and
-  // web/src/components/ImportForm.tsx.
-  if (input.options) {
-    await db
-      .update(accounts)
-      .set({ importOptions: JSON.stringify(input.options), updatedAt: now })
-      .where(eq(accounts.id, primaryAccount.id));
+  // web/src/components/ImportForm.tsx. The rate is a real account column
+  // (accounts.fxRateMicros — migrations/0007), not part of this JSON blob,
+  // but is updated in the same place for the same reason.
+  if (input.options || suppliedFxRateMicros !== undefined) {
+    const patch: { updatedAt: number; importOptions?: string; fxRateMicros?: number } = { updatedAt: now };
+    if (input.options) patch.importOptions = JSON.stringify(input.options);
+    if (suppliedFxRateMicros !== undefined) patch.fxRateMicros = suppliedFxRateMicros;
+    await db.update(accounts).set(patch).where(eq(accounts.id, primaryAccount.id));
   }
 
   return c.json(

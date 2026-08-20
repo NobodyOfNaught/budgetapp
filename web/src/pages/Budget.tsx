@@ -19,7 +19,7 @@ type View =
   | { kind: 'reports' }
   | { kind: 'rules' };
 
-export function Budget({ budgetId }: { budgetId: string }) {
+export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; budgetCurrencyCode: string }) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[] | null>(null);
   const [view, setView] = useState<View>({ kind: 'budget' });
@@ -27,6 +27,10 @@ export function Budget({ budgetId }: { budgetId: string }) {
   const [showImportForm, setShowImportForm] = useState(false);
   // Count of imported-but-unapproved rows, for the Review badge.
   const [unapprovedCount, setUnapprovedCount] = useState(0);
+  // Bumped every time reloadUnapproved runs — passed to ReviewImport so it
+  // refetches even when an import lands while its tab is already open
+  // (view.kind staying 'review' means it doesn't remount on its own).
+  const [reviewVersion, setReviewVersion] = useState(0);
   // Bumped whenever an account is created — a new account (starting balance
   // as income, or a fresh credit-card payment category) can change Ready to
   // Assign and category availability. BudgetMonth stays mounted while an
@@ -43,9 +47,10 @@ export function Budget({ budgetId }: { budgetId: string }) {
   }
 
   function reloadUnapproved() {
-    apiFetch<{ transactions: ReviewTransaction[] }>(`/budgets/${budgetId}/imports/review`).then((res) =>
-      setUnapprovedCount(res.transactions.length),
-    );
+    apiFetch<{ transactions: ReviewTransaction[] }>(`/budgets/${budgetId}/imports/review`).then((res) => {
+      setUnapprovedCount(res.transactions.length);
+      setReviewVersion((v) => v + 1);
+    });
   }
 
   function reloadCategories() {
@@ -129,6 +134,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
         {showAccountForm && (
           <AccountForm
             budgetId={budgetId}
+            budgetCurrencyCode={budgetCurrencyCode}
             onCreated={() => {
               setShowAccountForm(false);
               reloadAccounts();
@@ -144,6 +150,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
           <ImportForm
             budgetId={budgetId}
             accounts={accounts}
+            budgetCurrencyCode={budgetCurrencyCode}
             onImported={() => {
               // An import can create a currency sub-account and always adds
               // unapproved rows, so refresh both before the user lands on
@@ -181,6 +188,7 @@ export function Budget({ budgetId }: { budgetId: string }) {
           <ReviewImport
             budgetId={budgetId}
             categoryGroups={categoryGroups}
+            refreshToken={reviewVersion}
             onChanged={() => {
               reloadUnapproved();
               setAccountsVersion((v) => v + 1); // approving changes category activity

@@ -1,0 +1,19 @@
+-- Foreign-currency account exchange rate (PR 15) — one additive, nullable
+-- column, safe under the expand/contract rule (see the plan's "Guarding
+-- the shared production database").
+--
+-- Until now any account whose currency differed from the budget's was
+-- forced off-budget (src/routes/accounts.ts) — the first real case being
+-- Neo Mastercard, a Canadian credit card the user wants to actually
+-- budget, not just track. Storing a rate per account is what makes that
+-- safe: budgetAmountMinor (what src/domain/ledger.ts actually reads for
+-- categories/Ready to Assign/credit-card mechanics) can now be a real
+-- conversion instead of a same-as-native fallback that would otherwise
+-- inject foreign-currency numbers straight into USD categories.
+--
+-- Rate is budget-currency-per-1-unit-of-account-currency, x1,000,000
+-- (0.73 USD/CAD -> 730000) — integer, not float, matching this repo's
+-- no-floats-for-money discipline. NULL means "no rate on file" — same as
+-- import_options being NULL means "no saved choice"; a NULL rate keeps a
+-- foreign account off-budget exactly like today.
+ALTER TABLE accounts ADD COLUMN fx_rate_micros INTEGER;

@@ -6,8 +6,9 @@ import { parseWiseCsv, suggestedCategoryName as wiseSuggestion } from './wise';
 import { parseBecuCsv, suggestedCategoryName as becuSuggestion } from './becu';
 import { parseSplitwiseCsv, suggestedCategoryName as splitwiseSuggestion } from './splitwise';
 import { parseAacuCsv, suggestedCategoryName as aacuSuggestion } from './aacu';
+import { parseNeoCsv, suggestedCategoryName as neoSuggestion } from './neo';
 
-export const IMPORT_PROVIDERS = ['wise', 'becu', 'splitwise', 'aacu'] as const;
+export const IMPORT_PROVIDERS = ['wise', 'becu', 'splitwise', 'aacu', 'neo'] as const;
 export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 
 const PARSERS: Record<ImportProvider, StatementParser> = {
@@ -15,6 +16,7 @@ const PARSERS: Record<ImportProvider, StatementParser> = {
   becu: parseBecuCsv,
   splitwise: parseSplitwiseCsv,
   aacu: parseAacuCsv,
+  neo: parseNeoCsv,
 };
 
 /** Maps a provider's own category label onto a seeded category NAME, or null when there's no confident match. */
@@ -23,6 +25,7 @@ const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | nu
   becu: becuSuggestion,
   splitwise: splitwiseSuggestion,
   aacu: aacuSuggestion,
+  neo: neoSuggestion,
 };
 
 export function isImportProvider(value: string): value is ImportProvider {

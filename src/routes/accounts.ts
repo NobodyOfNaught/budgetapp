@@ -7,7 +7,7 @@ import { insertTransaction } from '../budget/transactions';
 import { getDb } from '../db/client';
 import { accounts, budgets } from '../db/schema';
 import { CREDIT_ACCOUNT_KINDS, type AccountKind } from '../domain/types';
-import { parseAmountToMinor } from '../lib/money';
+import { convertToBudgetMinor, parseAmountToMinor, parseFxRateToMicros } from '../lib/money';
 import { ulid } from '../lib/ids';
 import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
@@ -31,8 +31,10 @@ const createAccountSchema = z.object({
   note: z.string().trim().max(2000).optional(),
   startingBalance: z.string().optional(),
   startingBalanceDate: dateSchema.optional(),
-  /** ISO 4217, defaults to the budget's. A currency other than the budget's forces the account off-budget — see below. */
+  /** ISO 4217, defaults to the budget's. A currency other than the budget's forces the account off-budget UNLESS fxRate is also supplied — see below. */
   currencyCode: z.string().trim().length(3).toUpperCase().optional(),
+  /** Budget-currency-per-1-unit-of-account-currency, e.g. "0.73" for CAD in a USD budget. Required for a foreign-currency account to be on-budget. */
+  fxRate: z.string().trim().optional(),
   /** Which statement parser this account's files use, when it was set up for import. */
   importProvider: z.string().trim().min(1).max(40).optional(),
 });
@@ -42,6 +44,8 @@ const updateAccountSchema = z.object({
   note: z.string().trim().max(2000).nullable().optional(),
   sortOrder: z.number().int().optional(),
   closed: z.boolean().optional(),
+  /** Updates or clears (null) the account's remembered exchange rate — see createAccountSchema's fxRate. Does not retroactively re-convert existing transactions or change onBudget. */
+  fxRate: z.string().trim().nullable().optional(),
 });
 
 export const accountsRoute = new Hono<AppEnv>();
@@ -73,17 +77,28 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   if (!budget) return c.json({ error: 'not_found' }, 404);
 
   const currencyCode = input.currencyCode ?? budget.currencyCode;
-  // A foreign-currency account is forced OFF-budget. Budget math sums
-  // budgetAmountMinor, which needs a real conversion rate per transaction —
-  // and statement files supply one only where a conversion actually
-  // happened (a CAD purchase from a CAD balance has no CAD->USD rate in
-  // it). Rather than invent rates, such accounts track their balance
-  // faithfully and stay out of categories/Ready to Assign; money crossing
-  // into the budget does so as a transfer, which the ledger engine now
-  // treats as income (see src/domain/ledger.ts). Fully budgetable
-  // foreign-currency accounts are phase-5 work — see docs/plan.md.
   const isForeignCurrency = currencyCode !== budget.currencyCode;
-  const onBudget = isForeignCurrency ? false : (input.onBudget ?? !input.type.startsWith('tracking_'));
+
+  let fxRateMicros: number | null = null;
+  if (input.fxRate !== undefined) {
+    try {
+      fxRateMicros = parseFxRateToMicros(input.fxRate);
+    } catch {
+      return c.json({ error: 'invalid_fx_rate' }, 400);
+    }
+  }
+
+  // A foreign-currency account with NO rate is forced OFF-budget: budget
+  // math sums budgetAmountMinor, and without a rate there is nothing
+  // honest to put there but the native amount, which would silently
+  // inject foreign numbers into budget-currency categories. Supplying a
+  // rate (see fxRateMicros above) makes the account budgetable like any
+  // other — see src/lib/money.ts's convertToBudgetMinor and
+  // docs/plan.md's PR 15 notes. Money crossing into the budget from an
+  // account that stays off-budget still works as a transfer, which the
+  // ledger engine treats as income (see src/domain/ledger.ts).
+  const isBudgetable = !isForeignCurrency || fxRateMicros !== null;
+  const onBudget = isBudgetable ? (input.onBudget ?? !input.type.startsWith('tracking_')) : false;
   const accountId = ulid(now);
 
   await db.insert(accounts).values({
@@ -93,6 +108,7 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     type: input.type,
     onBudget,
     currencyCode,
+    fxRateMicros,
     importProvider: input.importProvider ?? null,
     note: input.note ?? null,
     createdAt: now,
@@ -123,6 +139,7 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
           date: input.startingBalanceDate ?? todayUtc(),
           amountMinor: minor,
           currencyCode,
+          budgetAmountMinor: fxRateMicros !== null ? convertToBudgetMinor(minor, fxRateMicros) : undefined,
           cleared: 'cleared',
         },
         now,
@@ -132,10 +149,10 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
 
   return c.json(
     {
-      account: { id: accountId, name: input.name, type: input.type, onBudget, currencyCode },
+      account: { id: accountId, name: input.name, type: input.type, onBudget, currencyCode, fxRateMicros },
       // Surfaced so the UI can explain the demotion rather than silently
       // producing an account that doesn't behave the way the user picked.
-      forcedOffBudget: isForeignCurrency,
+      forcedOffBudget: isForeignCurrency && !isBudgetable,
     },
     201,
   );
@@ -156,6 +173,19 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
     .limit(1);
   if (!existing) return c.json({ error: 'not_found' }, 404);
 
+  let fxRateMicros = existing.fxRateMicros;
+  if (input.fxRate !== undefined) {
+    if (input.fxRate === null) {
+      fxRateMicros = null;
+    } else {
+      try {
+        fxRateMicros = parseFxRateToMicros(input.fxRate);
+      } catch {
+        return c.json({ error: 'invalid_fx_rate' }, 400);
+      }
+    }
+  }
+
   const now = Date.now();
   await db
     .update(accounts)
@@ -164,6 +194,7 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
       note: input.note === undefined ? existing.note : input.note,
       sortOrder: input.sortOrder ?? existing.sortOrder,
       closedAt: input.closed === undefined ? existing.closedAt : input.closed ? now : null,
+      fxRateMicros,
       updatedAt: now,
     })
     .where(eq(accounts.id, accountId));

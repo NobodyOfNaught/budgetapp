@@ -769,6 +769,74 @@ inflow on the clearing account.
 - No migration, no schema change — `transactions.transfer_transaction_id`/
   `transfer_account_id` already existed; linking just sets them on rows that already exist.
 
+**Neo Mastercard import + budgetable foreign-currency accounts landed in PR 15**
+(`src/import/neo.ts`, `migrations/0007_account_fx_rate.sql`, `src/lib/money.ts`,
+`src/routes/accounts.ts`, `src/routes/imports.ts`), driven by two real Neo statements (a
+Canadian credit card, CAD, 20 rows total). This is the first account that's both foreign-
+currency *and* actually budgeted — PR 7 deliberately scoped multi-currency to
+off-budget-only (see above); this PR lifts that, for accounts with a rate.
+
+- **The one dangerous assumption that had to be fixed first.** `src/routes/imports.ts`
+  hardcoded `budgetAmountMinor: row.amountMinor` for every ordinary imported row, and
+  `insertTransaction`'s fallback (`src/budget/transactions.ts`) is
+  `input.budgetAmountMinor ?? input.amountMinor`. Both were safe only because a
+  foreign-currency account could never be on-budget — the moment that restriction lifts,
+  those two lines silently inject CAD numbers into USD categories. Fixing the conversion
+  at both call sites (imports, and an account's starting balance) is the actual core of
+  this PR; the parser itself is the easy part.
+- **`src/domain/ledger.ts` needed zero changes.** It already reads `budgetAmountMinor`
+  exclusively and gates only on `account.onBudget` — a foreign account with a *correct*
+  `budgetAmountMinor` on every row gets right category activity, Ready to Assign, and
+  credit-card payment-category mechanics for free. `test/months.test.ts` has a regression
+  test that exists specifically to prove this: a CAD credit card with a rate, one
+  categorized charge, asserting the converted USD activity and the payment-category
+  earmark — no ledger code touched to make it pass.
+- **Rate representation:** a new nullable `accounts.fx_rate_micros` (integer,
+  budget-currency-per-1-unit-of-account-currency × 1,000,000 — `0.73` CAD→USD rate is
+  `730000`), not a float, matching the no-floats-for-money discipline elsewhere in this
+  codebase even though a rate isn't itself money. **Guardrail: a foreign-currency account
+  may be on-budget only if it has a rate** — creating/updating one without a rate falls
+  back to off-budget exactly as before (regression-tested against the existing
+  Wise-CAD-subaccount case), and importing into an on-budget foreign account with no rate
+  anywhere (typed-in or remembered) is a 400 `missing_fx_rate`, never a silent 1:1
+  fallback. The rate is entered per import and remembered on the account
+  (`accounts.fx_rate_micros`) as next time's default — the same "remember the last choice"
+  shape as PR 10's `accounts.import_options`, but a real column rather than JSON, since an
+  FX rate is an account property, not a per-provider parsing choice.
+- **A `Status` column that includes `Declined`, not just `Posted`/`Pending`.** The real
+  July file contains a $1,452.51 marina charge that was declined — never actually spent.
+  Importing it would invent debt that doesn't exist, so `Declined` rows are skipped with a
+  visible reason, same treatment as the `Pending` skip (a pending row can't dedupe against
+  its own later-posted version — the same reasoning as AACU's `Pending` skip in PR 13).
+  Verified end to end against both real files: 20 rows in, 18 imported (1 Declined + 1
+  Pending skipped), and a real-browser smoke test confirmed the converted USD category
+  activity, the "Neo" payment-category earmark, both skip reasons visible in the review
+  summary, and a zero-row re-import.
+- **A real UI staleness bug, caught by the smoke test, fixed before shipping:**
+  `ReviewImport` only refetched on mount, so importing a second file while the Review tab
+  was already open (not navigating to it fresh) left the table showing the first file's
+  rows until something else happened to remount it — not Neo-specific, any two-file import
+  session in one sitting hit this. Fixed with a `refreshToken` prop bumped by
+  `Budget.tsx`'s `reloadUnapproved` (same shape as `BudgetMonth`'s existing
+  `refreshToken`/`accountsVersion`).
+- **Deliberately left out, and worth flagging:** manual transaction entry
+  (`POST`/`PATCH /transactions`) does not apply an account's `fx_rate_micros` — only
+  statement import and an account's starting balance do. Adding a manual charge to a
+  budgeted foreign-currency account today still writes `budgetAmountMinor = amountMinor`
+  unconverted, the same bug class this PR fixes for import — it just wasn't in this PR's
+  approved scope (`transactions.ts` wasn't in the original file list) and needs its own
+  pass across ordinary/split/transfer create *and* edit. Real gap, not yet closed.
+- **Also flagged, not fixed — a pre-existing data bug this PR's own investigation
+  surfaced:** UAT's `Cash (CAD)` account has a manually-entered starting balance whose
+  `budget_amount_minor` was never converted (`native = budget = 1282.68`, versus its
+  Wise-imported rows, which carry a real ~1.428 implied rate) — overstating that account's
+  contribution to net worth by roughly $383. Now that the rate machinery exists, this is a
+  one-row data fix, offered to the user rather than applied automatically.
+- No change to `docs/plan.md`'s "Guarding the shared production database" migration
+  discipline — `fx_rate_micros` is purely additive (a new nullable column nothing on
+  `main` currently references), so this shipped through the normal `uat` → `stg` → `main`
+  path per `CLAUDE.md`, not the breaking-migration shortcut.
+
 ---
 
 ## Roadmap
@@ -785,9 +853,9 @@ reads `budget_members`, so this is mostly UI. Activity log from the `revision` s
 Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the same budget
 see each other's edits.
 
-**Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, and PR 13* —
-per-provider CSV parsers (Wise, then BECU, then Splitwise, then AACU), an
-approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
+**Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, PR 13, and PR 15* —
+per-provider CSV parsers (Wise, then BECU, then Splitwise, then AACU, then Neo Mastercard),
+an approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
 heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
 as a net-position clearing account with per-import member selection (see PR 10's notes
 above). Still to come: learned
@@ -801,10 +869,16 @@ plus manual linking of two already-imported rows (see below). Still to come ther
 automatically at import time rather than on request, and the cross-currency case (PR 14
 requires both legs in the same currency), which is precisely the Phase 5 work below.
 
-**Phase 5 — Full multi-currency.** Multi-currency accounts in the UI. `budget_amount_minor`
-starts carrying real conversions. Effective rate on a transfer derived from the two legs.
-`exchange_rates` table for reporting-only conversions where no transaction supplies a rate.
-FX revaluation of foreign-currency tracking accounts.
+**Phase 5 — Full multi-currency.** *Partially landed in PR 15* — a foreign-currency account
+can now be genuinely on-budget, given a per-import exchange rate remembered on the account
+(`accounts.fx_rate_micros`); `budget_amount_minor` carries a real conversion on that
+account's imported rows and its starting balance (see PR 15's notes above). Still to come:
+the same conversion on manually-entered/edited transactions (`POST`/`PATCH /transactions`
+today still writes `budgetAmountMinor = amountMinor` for a foreign account — a known,
+flagged gap, not yet closed); per-transaction/historical rates rather than one flat rate
+per import; retroactive re-conversion when an account's rate changes (today only future
+imports pick up a new rate); an `exchange_rates` table for reporting-only conversions where
+no transaction supplies a rate; FX revaluation of foreign-currency balances over time.
 
 **Phase 6 — Beyond.** Bank feeds (Plaid / GoCardless / Salt Edge), public API, PWA with
 offline entry.

@@ -30,3 +30,48 @@ export function formatMinorAsDecimal(minor: number): string {
   const abs = Math.abs(minor);
   return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
 }
+
+// ---------------------------------------------------------------------------
+// Foreign-currency conversion — see accounts.fxRateMicros (src/db/schema.ts)
+// and docs/plan.md's PR 15 notes. Integer rate, not float, for the same
+// reason amounts are integer minor units: money math must never touch a
+// float. A rate isn't money, but multiplying an integer minor-unit amount
+// by one is, so the same discipline applies.
+// ---------------------------------------------------------------------------
+
+const RATE_SCALE = 1_000_000;
+const RATE_RE = /^\d+(\.\d+)?$/;
+// Generous but not unbounded — catches a fat-fingered "100" (meant "1.00")
+// or a rate typed in the wrong direction without hand-picking real-world
+// currency pairs.
+const MAX_RATE = 1000;
+
+/**
+ * Parses a user-facing exchange-rate string (e.g. "0.73") into integer
+ * micros (730000) — budget-currency per 1 unit of account currency. Throws
+ * on non-numeric input, zero/negative (a rate of 0 or below isn't a
+ * currency conversion, it's a bug), or anything above MAX_RATE.
+ */
+export function parseFxRateToMicros(input: string): number {
+  const trimmed = input.trim();
+  if (!RATE_RE.test(trimmed)) {
+    throw new Error(`invalid exchange rate: ${input}`);
+  }
+  const rate = Number(trimmed);
+  if (rate <= 0 || rate > MAX_RATE) {
+    throw new Error(`invalid exchange rate: ${input}`);
+  }
+  return Math.round(rate * RATE_SCALE);
+}
+
+/**
+ * Converts a native-currency minor-unit amount into the budget's currency,
+ * given a rate from parseFxRateToMicros. Rounds to the nearest minor unit
+ * PER ROW (not accumulated pre-rounding across many rows) — see
+ * src/routes/imports.ts, which calls this once per imported transaction,
+ * matching how a real card statement's own USD-equivalent column would
+ * round each charge independently.
+ */
+export function convertToBudgetMinor(amountMinor: number, fxRateMicros: number): number {
+  return Math.round((amountMinor * fxRateMicros) / RATE_SCALE);
+}

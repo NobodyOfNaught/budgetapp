@@ -233,6 +233,13 @@ export interface IncomeExpenseReport {
 
 export interface NetWorthReport {
   months: { month: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
+  /**
+   * Foreign-currency accounts with no exchange rate on file. Their balance
+   * couldn't be revalued, so it's still an accumulated sum of each
+   * transaction's own conversion — a figure that isn't really the value of
+   * anything. Surfaced so the UI can say so. See src/domain/reports.ts.
+   */
+  unvalued: { accountId: string; name: string; currencyCode: string }[];
 }
 
 // ---------------------------------------------------------------------------

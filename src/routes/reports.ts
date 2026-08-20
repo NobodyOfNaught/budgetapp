@@ -3,9 +3,9 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
 import { getDb, type Db } from '../db/client';
-import { accounts, categories, categoryMonths, transactions } from '../db/schema';
+import { accounts, budgets, categories, categoryMonths, transactions } from '../db/schema';
 import { computeLedger } from '../domain/ledger';
-import { netWorthTrend } from '../domain/reports';
+import { netWorthTrend, unvaluedForeignAccounts } from '../domain/reports';
 import { compareMonths, monthRange, nextMonth } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
@@ -114,10 +114,25 @@ reportsRoute.get('/net-worth', async (c) => {
   if (!range) return c.json({ error: 'invalid_range' }, 400);
 
   const db = getDb(c.env);
-  const [accountRows, balanceRows] = await Promise.all([
-    db.select({ id: accounts.id, type: accounts.type }).from(accounts).where(eq(accounts.budgetId, budgetId)),
+  const [budgetRow, accountRows, balanceRows] = await Promise.all([
+    db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1),
     db
-      .select({ accountId: transactions.accountId, date: transactions.date, budgetAmountMinor: transactions.budgetAmountMinor })
+      .select({
+        id: accounts.id,
+        name: accounts.name,
+        type: accounts.type,
+        currencyCode: accounts.currencyCode,
+        fxRateMicros: accounts.fxRateMicros,
+      })
+      .from(accounts)
+      .where(eq(accounts.budgetId, budgetId)),
+    db
+      .select({
+        accountId: transactions.accountId,
+        date: transactions.date,
+        amountMinor: transactions.amountMinor,
+        budgetAmountMinor: transactions.budgetAmountMinor,
+      })
       .from(transactions)
       .where(
         and(
@@ -127,15 +142,23 @@ reportsRoute.get('/net-worth', async (c) => {
         ),
       ),
   ]);
+  const budgetCurrencyCode = budgetRow[0]?.currencyCode;
+  if (!budgetCurrencyCode) return c.json({ error: 'not_found' }, 404);
 
   const months = monthRange(range.start, range.end);
-  const points = netWorthTrend(
-    balanceRows.filter((row) => row.date < nextMonth(range.end)),
-    accountRows,
-    months,
-  );
+  const inRange = balanceRows.filter((row) => row.date < nextMonth(range.end));
+  const points = netWorthTrend(inRange, accountRows, months, budgetCurrencyCode);
 
-  return c.json({ months: points });
+  // Foreign accounts with no rate on file: their balance couldn't be
+  // revalued, so it's still an accumulated per-transaction sum. Reported
+  // rather than silently folded in — see src/domain/reports.ts.
+  const unvalued = unvaluedForeignAccounts(inRange, accountRows, budgetCurrencyCode).map((a) => ({
+    accountId: a.id,
+    name: a.name,
+    currencyCode: a.currencyCode,
+  }));
+
+  return c.json({ months: points, unvalued });
 });
 
 /** The same accounts/categories/categoryMonths/transactions fetch shape as

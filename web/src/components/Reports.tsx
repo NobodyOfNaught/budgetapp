@@ -162,6 +162,15 @@ export function Reports({ budgetId, categoryGroups }: { budgetId: string; catego
       {netWorth === null ? (
         <p>Loading…</p>
       ) : (
+        <>
+        {netWorth.unvalued.length > 0 && (
+          <p style={{ color: '#c0392b', fontSize: '0.9em', marginBlock: '0.5rem' }}>
+            {netWorth.unvalued.map((a) => `${a.name} (${a.currencyCode})`).join(', ')}{' '}
+            {netWorth.unvalued.length === 1 ? 'has' : 'have'} no exchange rate, so{' '}
+            {netWorth.unvalued.length === 1 ? 'its balance is an estimate' : 'those balances are estimates'}. Set a rate
+            on the account to value {netWorth.unvalued.length === 1 ? 'it' : 'them'} properly.
+          </p>
+        )}
         <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -188,6 +197,7 @@ export function Reports({ budgetId, categoryGroups }: { budgetId: string; catego
             </tbody>
           </table>
         </div>
+        </>
       )}
     </section>
   );

@@ -15,6 +15,7 @@ interface IncomeExpenseReport {
 
 interface NetWorthReport {
   months: { month: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
+  unvalued: { accountId: string; name: string; currencyCode: string }[];
 }
 
 async function createAccount(
@@ -182,6 +183,49 @@ describe('GET /api/v1/budgets/:budgetId/reports/net-worth', () => {
     );
     expect(status).toBe(200);
     expect(body.months).toEqual([{ month: '2026-03-01', assetsMinor: 100000, liabilitiesMinor: -20000, netWorthMinor: 80000 }]);
+    expect(body.unvalued).toEqual([]); // single-currency budget, nothing to caveat
+  });
+
+  it('values a foreign account’s BALANCE at its rate, not the sum of its transactions’ own conversions', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-fx@example.com');
+    await createAccount(app, sessionCookie, budgetId, {
+      name: 'Neo',
+      type: 'credit_card',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+      startingBalance: '-1000.00',
+      startingBalanceDate: '2026-03-01',
+    });
+
+    const { body } = await callJson<NetWorthReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth?start=2026-03&end=2026-03`,
+    );
+    // CAD 1000.00 owed -> USD 730.00 at the account's rate.
+    expect(body.months[0]?.liabilitiesMinor).toBe(-73000);
+    expect(body.unvalued).toEqual([]);
+  });
+
+  it('reports a foreign account with no rate as unvalued rather than passing its estimate off as fact', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-unvalued@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Cash (CAD)',
+      type: 'tracking_asset',
+      currencyCode: 'CAD',
+      startingBalance: '1282.68',
+      startingBalanceDate: '2026-03-01',
+    });
+
+    const { body } = await callJson<NetWorthReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth?start=2026-03&end=2026-03`,
+    );
+    // No rate to revalue with, so the accumulated figure stands — but it is
+    // named, so the UI can mark it an estimate.
+    expect(body.months[0]?.assetsMinor).toBe(128268);
+    expect(body.unvalued).toEqual([{ accountId, name: 'Cash (CAD)', currencyCode: 'CAD' }]);
   });
 });
 

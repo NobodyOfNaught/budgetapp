@@ -847,6 +847,46 @@ off-budget-only (see above); this PR lifts that, for accounts with a rate.
   `main` currently references), so this shipped through the normal `uat` → `stg` → `main`
   path per `CLAUDE.md`, not the breaking-migration shortcut.
 
+**Net-worth FX revaluation — a conceptual correction to the above, same day.** Chasing the
+`Cash (CAD)` overstatement flagged in PR 15 turned up something bigger than a bad row: net
+worth was summing each transaction's own historical conversion to get an account's
+**balance**, and that is a category error, not a rounding one.
+
+- **Flow is historical; stock is current.** What spending cost you is fixed at the moment
+  it happened — an August restaurant charge shouldn't restate because the rate moved in
+  September — so per-transaction conversion is exactly right for category activity and
+  Ready to Assign in `src/domain/ledger.ts`. But a **balance** is worth what it converts to
+  at one rate *today*; the rates you happened to acquire it at are irrelevant. Summing
+  converted transactions to get a balance produces a number that is the value of nothing.
+- **The clearest demonstration**, and now a regression test: buy CAD 100 at 0.70, sell CAD
+  100 at 0.80. The account holds nothing. The old accumulated figure said **−$10 of net
+  worth for an account holding no money at all.** No rate correction fixes that — the model
+  was wrong, and the error compounds with every transaction that flows through.
+- **`netWorthTrend` now folds NATIVE amounts and converts the resulting balance once, per
+  snapshot**, for any account whose currency isn't the budget's. The fold keeps both running
+  sums (native and budget) and picks between them per account. Keyed off the **currency**,
+  not merely off having a rate: nothing stops `fxRate` being stored on an account already in
+  the budget's currency (`accounts.ts` parses it regardless), and applying one there would
+  silently scale a balance needing no conversion — pinned by a test.
+- **A foreign account with no rate can't be revalued, so it falls back to the old sum and is
+  REPORTED** (`unvaluedForeignAccounts`, surfaced as the net-worth response's `unvalued`
+  array, rendered as a notice in `Reports.tsx`). Nothing regresses for existing data and the
+  wrong number stops being silent — verified against real UAT data, where every USD account
+  is byte-identical and only `Cash (CAD)` changes, by gaining the flag.
+- **This is why the `Cash (CAD)` row was never patched.** Setting a rate on that account
+  takes it from $387.59 to CAD 5.96 × rate ≈ **$4** on its own. The $383 evaporates as a
+  consequence of the model being right rather than a hand-written `UPDATE` — which would
+  have made one number look better today and drifted again tomorrow.
+- **Known and accepted:** one stored rate per account means applying today's rate to every
+  month, so **past months restate as the rate moves**. Inherent to revaluing with a single
+  rate, documented in the function's header and pinned by a test that asserts the restating
+  behaviour deliberately. The `exchange_rates` table (still Phase 5) is the upgrade for
+  accurate history. **Still open:** unrealized FX gain/loss as its own reported line — it's
+  exactly `sum(budget_amount_minor) − (native × rate)` per foreign account, cheap to add,
+  but a new UI concept nobody asked for yet. The credit-card payment earmark has its own
+  version of this flow-vs-stock tension and is likewise untouched.
+- No migration — `fx_rate_micros` already shipped in 0007. Pure app change.
+
 ---
 
 ## Roadmap
@@ -883,14 +923,18 @@ requires both legs in the same currency), which is precisely the Phase 5 work be
 can now be genuinely on-budget, given a per-import exchange rate remembered on the account
 (`accounts.fx_rate_micros`); `budget_amount_minor` carries a real conversion on that
 account's imported rows, its starting balance, and (closed same-day as a fast follow-up)
-manually-entered/edited ordinary and split transactions (see PR 15's notes above). Still to
-come: the same conversion on manual **transfers** between different-currency accounts
-(`POST /transactions`'s transfer path still applies one amount to both legs regardless of
-currency — a known, flagged gap predating this PR, not yet closed); per-transaction/
-historical rates rather than one flat rate per import; retroactive re-conversion when an
-account's rate changes (today only future imports/entries pick up a new rate); an
-`exchange_rates` table for reporting-only conversions where no transaction supplies a rate;
-FX revaluation of foreign-currency balances over time.
+manually-entered/edited ordinary and split transactions. ~~FX revaluation of
+foreign-currency balances over time.~~ **Also landed** — net worth values a foreign
+account's balance at its rate rather than accumulating per-transaction conversions, with
+rate-less accounts reported rather than silently estimated (see PR 15's notes above).
+Still to come: the same conversion on manual **transfers** between different-currency
+accounts (`POST /transactions`'s transfer path still applies one amount to both legs
+regardless of currency — a known, flagged gap predating this PR, not yet closed);
+per-transaction/historical rates rather than one flat rate per import; retroactive
+re-conversion when an account's rate changes (today only future imports/entries pick up a
+new rate); an `exchange_rates` table so revaluation can use each month's real rate instead
+of applying today's to all of history; unrealized FX gain/loss as its own reported line;
+and the credit-card payment category's own flow-vs-stock version of this problem.
 
 **Phase 6 — Beyond.** Bank feeds (Plaid / GoCardless / Salt Edge), public API, PWA with
 offline entry.

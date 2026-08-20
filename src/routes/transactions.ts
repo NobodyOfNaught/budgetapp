@@ -14,7 +14,7 @@ import { getDb, type Db } from '../db/client';
 import { accounts, categories, payees, transactions } from '../db/schema';
 import { addDays } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
-import { parseAmountToMinor } from '../lib/money';
+import { convertToBudgetMinor, parseAmountToMinor } from '../lib/money';
 import type { AppEnv } from '../types/hono';
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD');
@@ -82,6 +82,20 @@ async function parseAmountOr400(amount: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Value in the budget's currency for a manually-entered amount on this
+ * account — mirrors the conversion src/routes/imports.ts already applies
+ * to imported rows and src/routes/accounts.ts applies to a starting
+ * balance. `undefined` (not the account's own currency's amount) when
+ * there's no rate on file, so insertTransaction's own
+ * `budgetAmountMinor ?? amountMinor` fallback applies — correct whenever
+ * the account IS the budget's currency, which is every account without a
+ * rate by construction (see accounts.ts's isBudgetable).
+ */
+function budgetAmountFor(account: { fxRateMicros: number | null }, minor: number): number | undefined {
+  return account.fxRateMicros !== null ? convertToBudgetMinor(minor, account.fxRateMicros) : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +186,7 @@ transactionsRoute.post('/', requireBudgetMember('editor'), async (c) => {
         memo: input.memo ?? null,
         cleared: input.cleared ?? 'uncleared',
         parts,
+        fxRateMicros: account.fxRateMicros,
       },
       now,
     );
@@ -197,6 +212,7 @@ transactionsRoute.post('/', requireBudgetMember('editor'), async (c) => {
       payeeId,
       memo: input.memo ?? null,
       cleared: input.cleared ?? 'uncleared',
+      budgetAmountMinor: budgetAmountFor(account, minor),
     },
     now,
   );
@@ -251,11 +267,27 @@ transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async 
     if (!(await categoryExists(db, budgetId, input.categoryId))) return c.json({ error: 'invalid_category' }, 400);
   }
 
+  // Only needed when the amount is actually changing (ordinary or split) —
+  // the account's rate, if any, is what makes budgetAmountMinor a real
+  // conversion here rather than the native-amount fallback. See
+  // budgetAmountFor above; existing.accountId can't change on an edit.
+  let fxRateMicros: number | null = null;
+  if (input.amount !== undefined || input.splits !== undefined) {
+    const [acct] = await db
+      .select({ fxRateMicros: accounts.fxRateMicros })
+      .from(accounts)
+      .where(eq(accounts.id, existing.accountId))
+      .limit(1);
+    fxRateMicros = acct?.fxRateMicros ?? null;
+  }
+
   let amountMinor: number | undefined;
+  let budgetAmountMinor: number | undefined;
   if (input.amount !== undefined) {
     const minor = await parseAmountOr400(input.amount);
     if (minor === null) return c.json({ error: 'invalid_amount' }, 400);
     amountMinor = minor;
+    budgetAmountMinor = fxRateMicros !== null ? convertToBudgetMinor(minor, fxRateMicros) : minor;
   }
 
   let payeeId: string | null | undefined;
@@ -277,7 +309,13 @@ transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async 
       await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, child.id));
     }
     amountMinor = parts.reduce((sum, p) => sum + p.amountMinor, 0);
+    // Same rule as insertSplitTransaction: convert each part, then sum
+    // those for the parent, rather than independently converting the
+    // total — keeps the parent exactly equal to the sum of its children.
+    budgetAmountMinor = 0;
     for (const part of parts) {
+      const partBudgetAmountMinor = fxRateMicros !== null ? convertToBudgetMinor(part.amountMinor, fxRateMicros) : part.amountMinor;
+      budgetAmountMinor += partBudgetAmountMinor;
       await insertTransaction(
         db,
         {
@@ -291,6 +329,7 @@ transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async 
           memo: part.memo ?? null,
           cleared: input.cleared ?? existing.cleared,
           parentTransactionId: transactionId,
+          budgetAmountMinor: partBudgetAmountMinor,
         },
         now,
       );
@@ -302,7 +341,7 @@ transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async 
     .set({
       date: input.date ?? existing.date,
       amountMinor: amountMinor ?? existing.amountMinor,
-      budgetAmountMinor: amountMinor ?? existing.budgetAmountMinor,
+      budgetAmountMinor: budgetAmountMinor ?? existing.budgetAmountMinor,
       categoryId: isSplit ? null : input.categoryId !== undefined ? input.categoryId : existing.categoryId,
       payeeId: payeeId !== undefined ? payeeId : existing.payeeId,
       memo: input.memo !== undefined ? input.memo : existing.memo,

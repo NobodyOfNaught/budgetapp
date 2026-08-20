@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import { transactions } from '../db/schema';
 import { ulid } from '../lib/ids';
+import { convertToBudgetMinor } from '../lib/money';
 
 export type ClearedStatus = 'uncleared' | 'cleared' | 'reconciled';
 
@@ -90,10 +91,14 @@ export async function insertSplitTransaction(
     memo: string | null;
     cleared: ClearedStatus;
     parts: SplitPart[];
+    /** The account's fx_rate_micros, when set — see src/lib/money.ts. Converts each part AND the parent (as the sum of the converted parts, not an independent conversion of the total, so the parent stays exactly equal to the sum of its children). */
+    fxRateMicros?: number | null;
   },
   now: number,
 ): Promise<string> {
   const totalMinor = input.parts.reduce((sum, p) => sum + p.amountMinor, 0);
+  const convertedParts =
+    input.fxRateMicros != null ? input.parts.map((p) => convertToBudgetMinor(p.amountMinor, input.fxRateMicros!)) : null;
   const parentId = await insertTransaction(
     db,
     {
@@ -105,11 +110,12 @@ export async function insertSplitTransaction(
       payeeId: input.payeeId,
       memo: input.memo,
       cleared: input.cleared,
+      budgetAmountMinor: convertedParts?.reduce((sum, m) => sum + m, 0),
     },
     now,
   );
 
-  for (const part of input.parts) {
+  for (const [i, part] of input.parts.entries()) {
     await insertTransaction(
       db,
       {
@@ -123,6 +129,7 @@ export async function insertSplitTransaction(
         memo: part.memo ?? null,
         cleared: input.cleared,
         parentTransactionId: parentId,
+        budgetAmountMinor: convertedParts?.[i],
       },
       now,
     );

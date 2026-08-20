@@ -819,13 +819,23 @@ off-budget-only (see above); this PR lifts that, for accounts with a rate.
   session in one sitting hit this. Fixed with a `refreshToken` prop bumped by
   `Budget.tsx`'s `reloadUnapproved` (same shape as `BudgetMonth`'s existing
   `refreshToken`/`accountsVersion`).
-- **Deliberately left out, and worth flagging:** manual transaction entry
-  (`POST`/`PATCH /transactions`) does not apply an account's `fx_rate_micros` — only
-  statement import and an account's starting balance do. Adding a manual charge to a
-  budgeted foreign-currency account today still writes `budgetAmountMinor = amountMinor`
-  unconverted, the same bug class this PR fixes for import — it just wasn't in this PR's
-  approved scope (`transactions.ts` wasn't in the original file list) and needs its own
-  pass across ordinary/split/transfer create *and* edit. Real gap, not yet closed.
+- **A follow-up gap, found right after shipping the above and closed the same day:**
+  manual transaction entry (`POST`/`PATCH /transactions`) didn't apply an account's
+  `fx_rate_micros` — only statement import and an account's starting balance did. A
+  manual charge on a budgeted foreign-currency account wrote `budgetAmountMinor =
+  amountMinor` unconverted, the same bug class the rest of this PR fixes for import; it
+  just wasn't in the originally-approved file list. **Closed for ordinary and split
+  create/edit** (`budgetAmountFor` in `src/routes/transactions.ts`; a split's parent
+  converts as the *sum of its converted children*, not an independent conversion of the
+  total, so it stays exactly equal to the sum of its children — same rule
+  `insertSplitTransaction` in `src/budget/transactions.ts` uses). **Deliberately still
+  open: manual transfers between different-currency accounts** — `POST /transactions`'s
+  transfer path applies one `amount` magnitude to both legs regardless of currency,
+  which predates this PR entirely (it was latent because no foreign account could be
+  on-budget before now) and needs its own pass across transfer create/edit, picking
+  which side's rate governs each leg. Worth knowing: Neo's own `Payment Received` rows
+  arrive through statement import, not a manual transfer, so they're already converted
+  correctly — this gap only bites a manually-entered payment.
 - **Also flagged, not fixed — a pre-existing data bug this PR's own investigation
   surfaced:** UAT's `Cash (CAD)` account has a manually-entered starting balance whose
   `budget_amount_minor` was never converted (`native = budget = 1282.68`, versus its
@@ -872,13 +882,15 @@ requires both legs in the same currency), which is precisely the Phase 5 work be
 **Phase 5 — Full multi-currency.** *Partially landed in PR 15* — a foreign-currency account
 can now be genuinely on-budget, given a per-import exchange rate remembered on the account
 (`accounts.fx_rate_micros`); `budget_amount_minor` carries a real conversion on that
-account's imported rows and its starting balance (see PR 15's notes above). Still to come:
-the same conversion on manually-entered/edited transactions (`POST`/`PATCH /transactions`
-today still writes `budgetAmountMinor = amountMinor` for a foreign account — a known,
-flagged gap, not yet closed); per-transaction/historical rates rather than one flat rate
-per import; retroactive re-conversion when an account's rate changes (today only future
-imports pick up a new rate); an `exchange_rates` table for reporting-only conversions where
-no transaction supplies a rate; FX revaluation of foreign-currency balances over time.
+account's imported rows, its starting balance, and (closed same-day as a fast follow-up)
+manually-entered/edited ordinary and split transactions (see PR 15's notes above). Still to
+come: the same conversion on manual **transfers** between different-currency accounts
+(`POST /transactions`'s transfer path still applies one amount to both legs regardless of
+currency — a known, flagged gap predating this PR, not yet closed); per-transaction/
+historical rates rather than one flat rate per import; retroactive re-conversion when an
+account's rate changes (today only future imports/entries pick up a new rate); an
+`exchange_rates` table for reporting-only conversions where no transaction supplies a rate;
+FX revaluation of foreign-currency balances over time.
 
 **Phase 6 — Beyond.** Bank feeds (Plaid / GoCardless / Salt Edge), public API, PWA with
 offline entry.

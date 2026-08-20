@@ -263,6 +263,140 @@ describe('splits', () => {
   });
 });
 
+// PR 15 follow-up: statement import (imports.ts) and an account's starting
+// balance (accounts.ts) already convert budgetAmountMinor via the
+// account's fx_rate_micros; manually adding/editing a transaction directly
+// through this route did not, until now — see budgetAmountFor in
+// src/routes/transactions.ts.
+describe('budgetable foreign-currency accounts: manual entry converts budgetAmountMinor', () => {
+  async function foreignAccount(app: Awaited<ReturnType<typeof signInNewUser>>['app'], sessionCookie: string, budgetId: string) {
+    return createAccount(app, sessionCookie, budgetId, { name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' });
+  }
+
+  it('an ordinary transaction converts on create', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('txn-fx-ordinary-create@example.com');
+    const accountId = await foreignAccount(app, sessionCookie, budgetId);
+
+    const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-01-10', amount: '-100.00', payeeName: 'Tim Hortons' }),
+    });
+
+    const row = await env.DB.prepare('select amount_minor as amountMinor, budget_amount_minor as budgetAmountMinor from transactions where id = ?')
+      .bind(body.transactionId)
+      .first<{ amountMinor: number; budgetAmountMinor: number }>();
+    expect(row?.amountMinor).toBe(-10000); // native CAD, unconverted
+    expect(row?.budgetAmountMinor).toBe(-7300); // -100.00 * 0.73 = -73.00 USD
+  });
+
+  it('an ordinary transaction re-converts on an amount edit', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('txn-fx-ordinary-edit@example.com');
+    const accountId = await foreignAccount(app, sessionCookie, budgetId);
+    const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-01-10', amount: '-100.00' }),
+    });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${body.transactionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ amount: '-50.00' }),
+    });
+
+    const row = await env.DB.prepare('select amount_minor as amountMinor, budget_amount_minor as budgetAmountMinor from transactions where id = ?')
+      .bind(body.transactionId)
+      .first<{ amountMinor: number; budgetAmountMinor: number }>();
+    expect(row?.amountMinor).toBe(-5000);
+    expect(row?.budgetAmountMinor).toBe(-3650); // -50.00 * 0.73 = -36.50 USD
+  });
+
+  it('a split converts each child AND the parent (sum of the converted children)', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('txn-fx-split-create@example.com');
+    const accountId = await foreignAccount(app, sessionCookie, budgetId);
+    const catId = await firstCategoryId(app, sessionCookie, budgetId);
+
+    const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'split',
+        accountId,
+        date: '2026-01-15',
+        splits: [
+          { amount: '-60.00', categoryId: catId },
+          { amount: '-40.00', categoryId: catId },
+        ],
+      }),
+    });
+
+    const parent = await env.DB.prepare('select budget_amount_minor as budgetAmountMinor from transactions where id = ?')
+      .bind(body.transactionId)
+      .first<{ budgetAmountMinor: number }>();
+    expect(parent?.budgetAmountMinor).toBe(-7300); // -100.00 CAD total * 0.73
+
+    const children = await env.DB.prepare(
+      'select budget_amount_minor as budgetAmountMinor from transactions where parent_transaction_id = ? order by budget_amount_minor',
+    )
+      .bind(body.transactionId)
+      .all<{ budgetAmountMinor: number }>();
+    expect(children.results).toEqual([{ budgetAmountMinor: -4380 }, { budgetAmountMinor: -2920 }]); // -60*0.73, -40*0.73
+  });
+
+  it('a split re-converts on edit', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('txn-fx-split-edit@example.com');
+    const accountId = await foreignAccount(app, sessionCookie, budgetId);
+    const catId = await firstCategoryId(app, sessionCookie, budgetId);
+    const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'split',
+        accountId,
+        date: '2026-01-15',
+        splits: [
+          { amount: '-10.00', categoryId: catId },
+          { amount: '-10.00', categoryId: catId },
+        ],
+      }),
+    });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${body.transactionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        splits: [
+          { amount: '-15.00', categoryId: catId },
+          { amount: '-10.00', categoryId: catId },
+        ],
+      }),
+    });
+
+    const parent = await env.DB.prepare('select budget_amount_minor as budgetAmountMinor from transactions where id = ?')
+      .bind(body.transactionId)
+      .first<{ budgetAmountMinor: number }>();
+    expect(parent?.budgetAmountMinor).toBe(-1825); // -25.00 CAD * 0.73 = -18.25 USD
+
+    const children = await env.DB.prepare(
+      'select budget_amount_minor as budgetAmountMinor from transactions where parent_transaction_id = ? and deleted_at is null order by budget_amount_minor',
+    )
+      .bind(body.transactionId)
+      .all<{ budgetAmountMinor: number }>();
+    expect(children.results).toEqual([{ budgetAmountMinor: -1095 }, { budgetAmountMinor: -730 }]); // -15*0.73, -10*0.73
+  });
+
+  it('an account in the budget currency (no rate) is unaffected — budgetAmountMinor stays native', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('txn-fx-native-unaffected@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+
+    const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-01-10', amount: '-42.50' }),
+    });
+
+    const row = await env.DB.prepare('select amount_minor as amountMinor, budget_amount_minor as budgetAmountMinor from transactions where id = ?')
+      .bind(body.transactionId)
+      .first<{ amountMinor: number; budgetAmountMinor: number }>();
+    expect(row?.amountMinor).toBe(-4250);
+    expect(row?.budgetAmountMinor).toBe(-4250);
+  });
+});
+
 describe('transfers', () => {
   it('creates both legs, linked, with correct opposite-signed amounts, visible in each account’s register', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('txn-transfer-create@example.com');

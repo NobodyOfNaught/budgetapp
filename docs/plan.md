@@ -887,6 +887,30 @@ worth was summing each transaction's own historical conversion to get an account
   version of this flow-vs-stock tension and is likewise untouched.
 - No migration — `fx_rate_micros` already shipped in 0007. Pure app change.
 
+**Editing an existing account, finally.** Shipping the revaluation notice above exposed
+that `PATCH /budgets/:id/accounts/:accountId` had never had a caller: the API accepted
+`name` (since PR 4) and `fxRate` (since PR 15), but no component invoked it, so there was
+no account-edit UI in the app at all. The notice told users to "set a rate on the account"
+— pointing at a control that did not exist. `AccountSettings.tsx` is that control, opened
+from an Edit button in the register header.
+
+- **Rename matters more than it looks**, because a currency sub-account is auto-named after
+  whatever the primary account was called at import time (`resolveCurrencyAccount` builds
+  `${primary.name} (${currency})`). Rename the primary later and the pair reads as
+  unrelated — real UAT data drifted exactly this way, leaving a `Cash (CAD)` account
+  belonging to a Wise account since renamed `Wise USD`.
+- **Renaming is safe for future imports, and that's load-bearing rather than incidental.**
+  `resolveCurrencyAccount` finds an existing sub-account by
+  `(budget_id, currency_code, import_provider)` — never by name — so a renamed sub-account
+  still catches its currency's rows instead of spawning a duplicate. Pinned by a test that
+  renames the sub-account and re-imports, asserting `accountsCreated` is empty and exactly
+  one CAD account still exists.
+- The net-worth notice now lists each unvalued account with a button that jumps straight to
+  its register (`onOpenAccount`, threaded through `Budget.tsx`'s view state — there's still
+  no router, see `App.tsx`), so the instruction and the control are one click apart.
+- The register header also states a foreign account's currency inline, and flags a missing
+  rate where the balance is shown rather than only on the reports screen.
+
 ---
 
 ## Roadmap

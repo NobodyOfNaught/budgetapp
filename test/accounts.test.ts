@@ -265,6 +265,66 @@ describe('foreign currency + exchange rate', () => {
     expect(row?.on_budget).toBe(1); // still on-budget — the account this leaves in the "needs a rate again" state that imports.ts's missing_fx_rate guard exists for, see test/imports.test.ts
   });
 
+  it('renaming a currency sub-account does not break which account future imports route to', async () => {
+    // The auto-created sub-account is named after whatever the primary was
+    // called at import time, so it drifts. Renaming has to be safe:
+    // resolveCurrencyAccount (src/routes/imports.ts) looks up by
+    // (budget, currency, provider), NEVER by name.
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-rename-subaccount@example.com');
+    const wise = await callJson<{ account: { id: string } }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Cash', type: 'checking', importProvider: 'wise' }),
+    });
+
+    const header =
+      'ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency",' +
+      '"Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency",' +
+      '"Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,' +
+      '"Created by",Category,Note';
+    const cadLeg =
+      '"CARD_TRANSACTION-4145111585",COMPLETED,OUT,"2026-08-03 17:11:26","2026-08-03 17:11:26",0.07,CAD,,,' +
+      '"Palle Helenius",15.70,CAD,"Taste of Europe Enterp",11.18,USD,0.7118960000000000,,,"Palle Helenius",Groceries,';
+    const usdLeg =
+      '"CARD_TRANSACTION-4145111585",COMPLETED,OUT,"2026-08-03 17:11:26","2026-08-03 17:11:26",0.00,USD,,,' +
+      '"Palle Helenius",23.32,USD,"Taste of Europe Enterp",23.32,USD,1.0000000000000000,,,"Palle Helenius",Groceries,';
+    const csv = [header, cadLeg, usdLeg, ''].join('\n');
+
+    async function importFile() {
+      return callJson<{ accountsCreated: string[] }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+        method: 'POST',
+        body: JSON.stringify({ accountId: wise.body.account.id, provider: 'wise', filename: 'w.csv', csv }),
+      });
+    }
+
+    const first = await importFile();
+    expect(first.body.accountsCreated).toEqual(['Cash (CAD)']);
+
+    const { body: listed } = await callJson<{ accounts: { id: string; name: string; currencyCode: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+    );
+    const subAccount = listed.accounts.find((a) => a.currencyCode === 'CAD')!;
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${subAccount.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Wise (CAD)', fxRate: '0.72' }),
+    });
+
+    // Re-importing routes the CAD rows to the SAME (renamed) account —
+    // nothing new is created despite the name no longer matching.
+    const second = await importFile();
+    expect(second.body.accountsCreated).toEqual([]);
+
+    const cadAccounts = await env.DB.prepare(
+      "select id, name, fx_rate_micros from accounts where budget_id = ? and currency_code = 'CAD' and deleted_at is null",
+    )
+      .bind(budgetId)
+      .all<{ id: string; name: string; fx_rate_micros: number }>();
+    expect(cadAccounts.results).toHaveLength(1);
+    expect(cadAccounts.results[0]).toMatchObject({ id: subAccount.id, name: 'Wise (CAD)', fx_rate_micros: 720000 });
+  });
+
   it('PATCH rejects an invalid exchange rate', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-invalid@example.com');
     const { body: created } = await callJson<{ account: { id: string } }>(

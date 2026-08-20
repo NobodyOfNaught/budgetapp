@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from 'react';
 import { apiFetch } from '../api';
+import { AccountSettings } from './AccountSettings';
 import type { Account, CategoryGroup, RegisterResponse, RegisterTransaction, TransferCandidate } from '../types';
 import { TransactionForm } from './TransactionForm';
 
@@ -16,16 +17,22 @@ export function Register({
   account,
   accounts,
   categoryGroups,
+  budgetCurrencyCode,
+  onAccountChanged,
 }: {
   budgetId: string;
   account: Account;
   accounts: Account[];
   categoryGroups: CategoryGroup[];
+  budgetCurrencyCode: string;
+  /** Renaming or re-rating an account changes the sidebar and the net worth report — see AccountSettings. */
+  onAccountChanged: () => void;
 }) {
   const [data, setData] = useState<RegisterResponse | null>(null);
   const [search, setSearch] = useState('');
   const [clearedOnly, setClearedOnly] = useState(false);
   const [form, setForm] = useState<FormState>(null);
+  const [editingAccount, setEditingAccount] = useState(false);
   // Which row's "Link transfer" panel is open, and what the server offered
   // for it. `null` candidates means the fetch is still in flight — see
   // src/routes/transactions.ts's transfer-candidates endpoint.
@@ -90,11 +97,36 @@ export function Register({
 
   return (
     <section>
-      <h2>{account.name}</h2>
+      <h2>
+        {account.name}{' '}
+        <button type="button" onClick={() => setEditingAccount((v) => !v)} style={{ fontSize: '0.6em', fontWeight: 'normal', verticalAlign: 'middle' }}>
+          {editingAccount ? 'Cancel' : 'Edit'}
+        </button>
+      </h2>
       <p>
         Balance: <strong>{formatMinor(data?.accountBalance ?? 0)}</strong> · Cleared:{' '}
         {formatMinor(data?.clearedBalance ?? 0)}
+        {account.currencyCode !== budgetCurrencyCode && (
+          <>
+            {' '}· in {account.currencyCode}
+            {account.fxRateMicros === null && (
+              <span style={{ color: '#c0392b' }}> · no exchange rate — its value in {budgetCurrencyCode} is an estimate</span>
+            )}
+          </>
+        )}
       </p>
+      {editingAccount && (
+        <AccountSettings
+          budgetId={budgetId}
+          account={account}
+          budgetCurrencyCode={budgetCurrencyCode}
+          onSaved={() => {
+            setEditingAccount(false);
+            onAccountChanged();
+          }}
+          onCancel={() => setEditingAccount(false)}
+        />
+      )}
 
       <div>
         <input placeholder="Search payee or memo…" value={search} onChange={(e) => setSearch(e.target.value)} />{' '}

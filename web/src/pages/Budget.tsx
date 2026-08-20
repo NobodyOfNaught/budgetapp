@@ -195,11 +195,27 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
             }}
           />
         )}
-        {view.kind === 'reports' && <Reports budgetId={budgetId} categoryGroups={categoryGroups} />}
+        {view.kind === 'reports' && (
+          <Reports
+            budgetId={budgetId}
+            categoryGroups={categoryGroups}
+            onOpenAccount={(accountId) => setView({ kind: 'account', accountId })}
+          />
+        )}
         {view.kind === 'rules' && <PayeeRules budgetId={budgetId} categoryGroups={categoryGroups} />}
         {view.kind === 'account' &&
           (selectedAccount ? (
-            <Register budgetId={budgetId} account={selectedAccount} accounts={accounts} categoryGroups={categoryGroups} />
+            <Register
+              budgetId={budgetId}
+              account={selectedAccount}
+              accounts={accounts}
+              categoryGroups={categoryGroups}
+              budgetCurrencyCode={budgetCurrencyCode}
+              onAccountChanged={() => {
+                reloadAccounts();
+                reloadCategories(); // renaming a credit account renames its payment category
+              }}
+            />
           ) : (
             <p>Add an account to get started.</p>
           ))}

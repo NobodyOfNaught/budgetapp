@@ -52,7 +52,16 @@ interface FlatCategory {
  * formatMinor idiom, so this stays consistent rather than being the first
  * screen to introduce one.
  */
-export function Reports({ budgetId, categoryGroups }: { budgetId: string; categoryGroups: CategoryGroup[] }) {
+export function Reports({
+  budgetId,
+  categoryGroups,
+  onOpenAccount,
+}: {
+  budgetId: string;
+  categoryGroups: CategoryGroup[];
+  /** Jumps to an account's register, where its exchange rate can be set — see AccountSettings. */
+  onOpenAccount: (accountId: string) => void;
+}) {
   const [start, setStart] = useState(() => shiftMonth(currentMonth(), -5));
   const [end, setEnd] = useState(() => currentMonth());
   const [spending, setSpending] = useState<SpendingReport | null>(null);
@@ -164,12 +173,23 @@ export function Reports({ budgetId, categoryGroups }: { budgetId: string; catego
       ) : (
         <>
         {netWorth.unvalued.length > 0 && (
-          <p style={{ color: '#c0392b', fontSize: '0.9em', marginBlock: '0.5rem' }}>
-            {netWorth.unvalued.map((a) => `${a.name} (${a.currencyCode})`).join(', ')}{' '}
-            {netWorth.unvalued.length === 1 ? 'has' : 'have'} no exchange rate, so{' '}
-            {netWorth.unvalued.length === 1 ? 'its balance is an estimate' : 'those balances are estimates'}. Set a rate
-            on the account to value {netWorth.unvalued.length === 1 ? 'it' : 'them'} properly.
-          </p>
+          <div style={{ color: '#c0392b', fontSize: '0.9em', marginBlock: '0.5rem' }}>
+            <p style={{ margin: 0 }}>
+              {netWorth.unvalued.length === 1 ? 'This account has' : 'These accounts have'} no exchange rate, so{' '}
+              {netWorth.unvalued.length === 1 ? 'its balance is an estimate' : 'their balances are estimates'} rather
+              than a real conversion:
+            </p>
+            <ul style={{ margin: '0.25rem 0 0' }}>
+              {netWorth.unvalued.map((a) => (
+                <li key={a.accountId}>
+                  {a.name} ({a.currencyCode}) —{' '}
+                  <button type="button" onClick={() => onOpenAccount(a.accountId)}>
+                    Set a rate
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>

@@ -200,6 +200,25 @@ describe('foreign-currency accounts', () => {
 // the native-currency fallback that was safe only while foreign accounts
 // were unconditionally off-budget — see src/routes/imports.ts.
 describe('budgetable foreign-currency import', () => {
+  it('accepts a comma-decimal rate typed by a user whose locale uses one — real Neo failure otherwise', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-fx-comma@example.com');
+    const created = await createAccount(app, sessionCookie, budgetId, { name: 'Neo', type: 'credit_card', currencyCode: 'CAD' });
+    expect(created.account.onBudget).toBe(false); // no rate yet
+
+    const { status, body } = await importCsv(app, sessionCookie, budgetId, created.account.id, csv(TIM_HORTONS_CAD), {
+      fxRate: '0,73',
+    });
+    expect(status).toBe(201);
+    expect(body.imported).toBe(1);
+
+    const { body: accountsList } = await callJson<{ accounts: { id: string; fxRateMicros: number | null }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+    );
+    expect(accountsList.accounts.find((a) => a.id === created.account.id)?.fxRateMicros).toBe(730000);
+  });
+
   it('converts budgetAmountMinor using the supplied rate — native and budget currency disagree', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('import-fx-convert@example.com');
     const created = await createAccount(app, sessionCookie, budgetId, {

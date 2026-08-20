@@ -54,10 +54,18 @@ const MAX_RATE = 1000;
  */
 export function parseFxRateToMicros(input: string): number {
   const trimmed = input.trim();
-  if (!RATE_RE.test(trimmed)) {
+  // Accept a comma as the decimal separator too (e.g. "0,73") — common
+  // outside the US, and the alternative is rejecting it as invalid_fx_rate
+  // with no indication of why, which is exactly what happened with a real
+  // Neo import: the UI's generic "could not import" catch-all (see
+  // ImportForm.tsx) gave no hint the actual problem was a comma. Only
+  // normalized when the whole string is digits-comma-digits, so a
+  // thousands-separator typo like "1,234" isn't silently reinterpreted.
+  const normalized = /^\d+,\d+$/.test(trimmed) ? trimmed.replace(',', '.') : trimmed;
+  if (!RATE_RE.test(normalized)) {
     throw new Error(`invalid exchange rate: ${input}`);
   }
-  const rate = Number(trimmed);
+  const rate = Number(normalized);
   if (rate <= 0 || rate > MAX_RATE) {
     throw new Error(`invalid exchange rate: ${input}`);
   }

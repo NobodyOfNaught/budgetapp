@@ -20,6 +20,18 @@ describe('parseFxRateToMicros', () => {
     expect(() => parseFxRateToMicros('1001')).toThrow();
   });
 
+  it('accepts a comma as the decimal separator — a real Neo import failed on exactly this', () => {
+    expect(parseFxRateToMicros('0,73')).toBe(730000);
+    expect(parseFxRateToMicros(' 0,73 ')).toBe(730000);
+  });
+
+  it('does not reinterpret a thousands-separator comma as a decimal point', () => {
+    // "1,234" is out of RATE_RE's shape once normalized would make it
+    // "1.234" — fine — but a genuine multi-comma typo like "1,234,5"
+    // should still be rejected outright, not silently mangled.
+    expect(() => parseFxRateToMicros('1,234,5')).toThrow();
+  });
+
   it('accepts a rate right at the upper bound', () => {
     expect(parseFxRateToMicros('1000')).toBe(1000000000);
   });

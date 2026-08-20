@@ -911,6 +911,25 @@ from an Edit button in the register header.
 - The register header also states a foreign account's currency inline, and flags a missing
   rate where the balance is shown rather than only on the reports screen.
 
+**Two real bugs found from a real failed import, same day.** Trying the exchange-rate field
+against an actual account produced `"Could not import that file — check it came from the
+provider you picked."` for a rate typed as `0,73` — comma decimal separator. Two separate
+defects, both fixed:
+
+- **`parseFxRateToMicros` rejected a comma decimal separator outright.** Common outside the
+  US, and there was no reason to reject it — `src/lib/money.ts` now normalizes a
+  digits-comma-digits string to a period before validating (a genuine multi-comma typo like
+  `1,234,5` is still rejected, so a thousands separator isn't silently reinterpreted).
+- **The real bug, and the reason the first one was so hard to diagnose: `ImportForm.tsx`'s
+  submit handler collapsed EVERY failure — `invalid_fx_rate`, `missing_fx_rate`,
+  `invalid_options`, `invalid_account`, an actually-unparseable file — into the same one
+  generic sentence, always blaming "the provider you picked" regardless of what actually
+  went wrong.** Fixed with `importErrorMessage()`, a lookup from each `{ error: '<code>' }`
+  `src/routes/imports.ts` can return to a message that actually says what to fix. The comma
+  fix alone would have left the confusing message in place for every OTHER 400 this route
+  can return; fixing only the message would have left comma-decimal rates rejected. Both
+  landed together.
+
 ---
 
 ## Roadmap

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../api';
+import { apiFetch, ApiError } from '../api';
 import type { Account, ImportBatch, ImportSummary } from '../types';
 
 const PROVIDERS: { value: string; label: string }[] = [
@@ -28,6 +28,30 @@ function formatWhen(epochMs: number): string {
 /** Micros (accounts.fxRateMicros) back to a plain decimal string for the input field, e.g. 730000 -> "0.73". */
 function formatFxRate(micros: number): string {
   return (micros / 1_000_000).toString();
+}
+
+// Every `{ error: '<code>' }` src/routes/imports.ts's POST handler can
+// return. Previously ALL of these (plus a genuinely unparseable file) fell
+// through to one generic "check it came from the provider you picked"
+// message — actively misleading for e.g. invalid_fx_rate, which has
+// nothing to do with the provider. A real Neo import failed on exactly
+// this: a comma-decimal rate ("0,73") 400'd as invalid_fx_rate, and the
+// generic message sent the search everywhere except the rate field.
+const IMPORT_ERROR_MESSAGES: Record<string, string> = {
+  unknown_provider: 'Unknown provider — try picking it again.',
+  invalid_account: 'That account could not be found.',
+  invalid_options: 'Pick at least one person before importing.',
+  invalid_fx_rate: 'That exchange rate isn’t a valid number — e.g. 0.73.',
+  missing_fx_rate: 'This account needs an exchange rate to import into — enter one above.',
+  could_not_parse_file: 'Could not read that file — check it came from the provider you picked.',
+};
+
+function importErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && typeof err.body === 'object' && err.body !== null && 'error' in err.body) {
+    const code = (err.body as { error: unknown }).error;
+    if (typeof code === 'string' && code in IMPORT_ERROR_MESSAGES) return IMPORT_ERROR_MESSAGES[code]!;
+  }
+  return 'Could not import that file — try again.';
 }
 
 /**
@@ -176,8 +200,8 @@ export function ImportForm({
       setSummary(result);
       onImported(result);
       loadHistory();
-    } catch {
-      setError('Could not import that file — check it came from the provider you picked.');
+    } catch (err) {
+      setError(importErrorMessage(err));
     } finally {
       setSubmitting(false);
     }

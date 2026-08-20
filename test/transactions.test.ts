@@ -385,6 +385,180 @@ describe('credit card mechanics, end to end through the real ledger engine', () 
   });
 });
 
+describe('linking two existing transactions as a transfer', () => {
+  /** Two uncategorized, opposite-amount rows in different accounts — the shape a pair of imports lands in. */
+  async function twoHalves(
+    email: string,
+    opts: { amountA?: string; amountB?: string; dateA?: string; dateB?: string } = {},
+  ) {
+    const ctx = await signInNewUser(email);
+    const { app, sessionCookie, budgetId } = ctx;
+    const bankId = await createAccount(app, sessionCookie, budgetId, { name: 'Bank', type: 'checking' });
+    const clearingId = await createAccount(app, sessionCookie, budgetId, { name: 'Splitwise', type: 'checking' });
+
+    const mk = async (accountId: string, date: string, amount: string) => {
+      const { body } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+        method: 'POST',
+        body: JSON.stringify({ kind: 'ordinary', accountId, date, amount }),
+      });
+      return body.transactionId;
+    };
+
+    const outflowId = await mk(bankId, opts.dateA ?? '2026-08-10', opts.amountA ?? '-190.00');
+    const inflowId = await mk(clearingId, opts.dateB ?? '2026-08-10', opts.amountB ?? '190.00');
+    return { ...ctx, bankId, clearingId, outflowId, inflowId };
+  }
+
+  it('suggests the opposite-amount row in another account as a candidate', async () => {
+    const { app, sessionCookie, budgetId, outflowId, inflowId, clearingId } = await twoHalves('txn-link-suggest@example.com');
+
+    const { body } = await callJson<{ candidates: { id: string; accountId: string; accountName: string; amountMinor: number }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outflowId}/transfer-candidates`,
+    );
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]).toMatchObject({ id: inflowId, accountId: clearingId, accountName: 'Splitwise', amountMinor: 19000 });
+  });
+
+  it('offers a match a few days apart, but not one outside the window', async () => {
+    const near = await twoHalves('txn-link-near@example.com', { dateA: '2026-08-10', dateB: '2026-08-13' });
+    const nearRes = await callJson<{ candidates: unknown[] }>(
+      near.app,
+      near.sessionCookie,
+      `/api/v1/budgets/${near.budgetId}/transactions/${near.outflowId}/transfer-candidates`,
+    );
+    expect(nearRes.body.candidates).toHaveLength(1);
+
+    const far = await twoHalves('txn-link-far@example.com', { dateA: '2026-08-10', dateB: '2026-09-10' });
+    const farRes = await callJson<{ candidates: unknown[] }>(
+      far.app,
+      far.sessionCookie,
+      `/api/v1/budgets/${far.budgetId}/transactions/${far.outflowId}/transfer-candidates`,
+    );
+    expect(farRes.body.candidates).toEqual([]);
+  });
+
+  it('links the pair, giving each leg the other account’s transfer payee', async () => {
+    const { app, sessionCookie, budgetId, bankId, clearingId, outflowId, inflowId } = await twoHalves('txn-link-do@example.com');
+
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outflowId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inflowId }),
+    });
+    expect(status).toBe(200);
+
+    const bank = await callJson<{ transactions: { id: string; payeeName: string; transferAccountId: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${bankId}/transactions`,
+    );
+    expect(bank.body.transactions[0]).toMatchObject({ id: outflowId, payeeName: 'Transfer : Splitwise', transferAccountId: clearingId });
+
+    const clearing = await callJson<{ transactions: { id: string; payeeName: string; transferAccountId: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${clearingId}/transactions`,
+    );
+    expect(clearing.body.transactions[0]).toMatchObject({ id: inflowId, payeeName: 'Transfer : Bank', transferAccountId: bankId });
+  });
+
+  it('leaves Ready to Assign unchanged — the whole point of linking being safe on existing data', async () => {
+    const { app, sessionCookie, budgetId, outflowId, inflowId } = await twoHalves('txn-link-rta@example.com');
+
+    const before = await callJson<{ readyToAssign: number }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-08`);
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outflowId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inflowId }),
+    });
+    const after = await callJson<{ readyToAssign: number }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-08`);
+
+    expect(after.body.readyToAssign).toBe(before.body.readyToAssign);
+  });
+
+  it('refuses a categorized row — linking one would silently move money', async () => {
+    const { app, sessionCookie, budgetId, outflowId, inflowId } = await twoHalves('txn-link-categorized@example.com');
+    const groups = await callJson<{ groups: { categories: { id: string; name: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const categoryId = groups.body.groups.flatMap((g) => g.categories).find((cat) => cat.name === 'Groceries')!.id;
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outflowId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ categoryId }),
+    });
+
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outflowId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inflowId }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('is_categorized');
+
+    // ...and the candidate search reports the same blocker rather than offering a doomed match.
+    const candidates = await callJson<{ candidates: unknown[]; blocked: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outflowId}/transfer-candidates`,
+    );
+    expect(candidates.body).toMatchObject({ candidates: [], blocked: 'is_categorized' });
+  });
+
+  it('refuses amounts that do not offset, and a row already in a transfer', async () => {
+    const { app, sessionCookie, budgetId, outflowId, inflowId } = await twoHalves('txn-link-refuse@example.com', {
+      amountB: '191.00',
+    });
+    const mismatch = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outflowId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inflowId }) },
+    );
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.error).toBe('amounts_do_not_offset');
+
+    const ok = await twoHalves('txn-link-twice@example.com');
+    await callJson(ok.app, ok.sessionCookie, `/api/v1/budgets/${ok.budgetId}/transactions/${ok.outflowId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: ok.inflowId }),
+    });
+    const again = await callJson<{ error: string }>(
+      ok.app,
+      ok.sessionCookie,
+      `/api/v1/budgets/${ok.budgetId}/transactions/${ok.outflowId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: ok.inflowId }) },
+    );
+    expect(again.status).toBe(400);
+    expect(again.body.error).toBe('already_a_transfer');
+  });
+
+  it('unlinks back to two ordinary transactions, both surviving', async () => {
+    const { app, sessionCookie, budgetId, bankId, clearingId, outflowId, inflowId } = await twoHalves('txn-unlink@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outflowId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inflowId }),
+    });
+
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outflowId}/unlink-transfer`, {
+      method: 'POST',
+    });
+    expect(status).toBe(200);
+
+    for (const accountId of [bankId, clearingId]) {
+      const reg = await callJson<{ transactions: { transferAccountId: string | null; payeeName: string | null }[] }>(
+        app,
+        sessionCookie,
+        `/api/v1/budgets/${budgetId}/accounts/${accountId}/transactions`,
+      );
+      expect(reg.body.transactions).toHaveLength(1); // both halves still there
+      expect(reg.body.transactions[0]).toMatchObject({ transferAccountId: null, payeeName: null });
+    }
+  });
+});
+
 describe('authorization', () => {
   it('403s for a user who is not a budget member', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('txn-owner@example.com');

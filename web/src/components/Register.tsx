@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { apiFetch } from '../api';
-import type { Account, CategoryGroup, RegisterResponse, RegisterTransaction } from '../types';
+import type { Account, CategoryGroup, RegisterResponse, RegisterTransaction, TransferCandidate } from '../types';
 import { TransactionForm } from './TransactionForm';
 
 function formatMinor(minor: number): string {
@@ -26,6 +26,12 @@ export function Register({
   const [search, setSearch] = useState('');
   const [clearedOnly, setClearedOnly] = useState(false);
   const [form, setForm] = useState<FormState>(null);
+  // Which row's "Link transfer" panel is open, and what the server offered
+  // for it. `null` candidates means the fetch is still in flight — see
+  // src/routes/transactions.ts's transfer-candidates endpoint.
+  const [linkingId, setLinkingId] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<TransferCandidate[] | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   function reload() {
     const params = new URLSearchParams();
@@ -39,6 +45,42 @@ export function Register({
   async function handleDelete(id: string) {
     if (!window.confirm('Delete this transaction?')) return;
     await apiFetch(`/budgets/${budgetId}/transactions/${id}`, { method: 'DELETE' });
+    reload();
+  }
+
+  async function toggleLinkPanel(id: string) {
+    setLinkError(null);
+    if (linkingId === id) {
+      setLinkingId(null);
+      return;
+    }
+    setLinkingId(id);
+    setCandidates(null);
+    const res = await apiFetch<{ candidates: TransferCandidate[] }>(
+      `/budgets/${budgetId}/transactions/${id}/transfer-candidates`,
+    );
+    setCandidates(res.candidates);
+  }
+
+  async function handleLink(id: string, otherTransactionId: string) {
+    setLinkError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/transactions/${id}/link-transfer`, {
+        method: 'POST',
+        body: JSON.stringify({ otherTransactionId }),
+      });
+      setLinkingId(null);
+      reload();
+    } catch {
+      setLinkError('Could not link those two — reload and try again.');
+    }
+  }
+
+  async function handleUnlink(id: string) {
+    // Worth spelling out: the two rows survive as ordinary transactions,
+    // unlike Delete, which removes BOTH halves of a transfer at once.
+    if (!window.confirm('Unlink this transfer? Both transactions stay, just no longer linked.')) return;
+    await apiFetch(`/budgets/${budgetId}/transactions/${id}/unlink-transfer`, { method: 'POST' });
     reload();
   }
 
@@ -102,7 +144,8 @@ export function Register({
             </thead>
             <tbody>
               {data.transactions.map((t) => (
-                <tr key={t.id} style={{ borderTop: '1px solid #ddd' }}>
+                <Fragment key={t.id}>
+                <tr style={{ borderTop: '1px solid #ddd' }}>
                   <td>
                     {t.date}
                     {!t.approved && (
@@ -124,9 +167,46 @@ export function Register({
                     )}
                     {t.transferAccountId && <button onClick={() => setForm({ mode: 'transfer', editing: t })}>Edit</button>}
                     {t.isSplit && <button onClick={() => setForm({ mode: 'split', editing: t })}>Edit</button>}{' '}
+                    {/* Only an ordinary, uncategorized row can become half
+                        of a transfer — the same rule the API enforces, so
+                        the button never appears where it would 400. */}
+                    {!t.isSplit && !t.transferAccountId && !t.categoryId && (
+                      <>
+                        <button onClick={() => toggleLinkPanel(t.id)}>
+                          {linkingId === t.id ? 'Cancel link' : 'Link transfer'}
+                        </button>{' '}
+                      </>
+                    )}
+                    {t.transferAccountId && <button onClick={() => handleUnlink(t.id)}>Unlink</button>}{' '}
                     <button onClick={() => handleDelete(t.id)}>Delete</button>
                   </td>
                 </tr>
+                {linkingId === t.id && (
+                  <tr>
+                    <td colSpan={8} style={{ background: '#fafafa', padding: '0.5rem' }}>
+                      {candidates === null ? (
+                        <span style={{ color: '#666' }}>Looking for a matching transaction…</span>
+                      ) : candidates.length === 0 ? (
+                        <span style={{ color: '#666' }}>
+                          No match found — nothing in another account has the opposite amount within a few days.
+                        </span>
+                      ) : (
+                        <>
+                          <p style={{ margin: '0 0 0.25rem' }}>Link this to:</p>
+                          {candidates.map((cand) => (
+                            <div key={cand.id} style={{ marginBottom: '0.25rem' }}>
+                              <button onClick={() => handleLink(t.id, cand.id)}>Link</button>{' '}
+                              <strong>{cand.accountName}</strong> · {cand.date} · {formatMinor(cand.amountMinor)}
+                              {cand.importPayeeRaw && <span style={{ color: '#666' }}> · {cand.importPayeeRaw}</span>}
+                            </div>
+                          ))}
+                        </>
+                      )}
+                      {linkError && <p style={{ color: '#c0392b', margin: '0.25rem 0 0' }}>{linkError}</p>}
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

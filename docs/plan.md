@@ -731,6 +731,44 @@ export are AACU's own, found by analyzing a real 52-row file before writing any 
   `accounts.import_provider`/`import_batches.provider` are free-form `text` columns that
   needed no schema change to accept `'aacu'`.
 
+**Linking two existing transactions as a transfer landed in PR 14**
+(`src/routes/transactions.ts`, `web/src/components/Register.tsx`). Until now a transfer
+could only be *created* as a fresh pair of rows, which is no help when both halves already
+exist — the recurring case being one real money movement that arrives through two different
+statement imports: a Venmo outflow on a bank account and the matching Splitwise settlement
+inflow on the clearing account.
+
+- **Linking is arithmetically a no-op, and that's the point.** An uncategorized
+  non-transfer row on an on-budget account moves Ready to Assign by its own amount, so an
+  equal-and-opposite pair already nets to zero before linking; afterwards both legs take
+  `computeLedger`'s `isTransfer` branch and contribute nothing at all. Same total either
+  way. What linking buys is that the pair can no longer *drift*: a stray category or a
+  payee rule can't silently turn one half into spending, and a pair straddling a month
+  boundary stops distorting either month's income. Pinned by a test asserting Ready to
+  Assign is byte-identical before and after a link.
+- **A categorized row is refused, not silently fixed.** That case genuinely changes the
+  arithmetic (the category activity stays, but the counterpart's Ready-to-Assign movement
+  disappears), so `is_categorized` is a 400 and the UI hides the button — the only way to
+  keep "link" from moving money behind the user's back. Same for split parents/children,
+  same account, currency mismatch, non-offsetting amounts, and a zero/zero pair (which is
+  not a transfer of anything and would link two unrelated rows on a technicality).
+- **Suggestions are exact-amount only**, opposite sign, different account, within
+  `TRANSFER_MATCH_WINDOW_DAYS` (5) — a near-miss match on money is a guess, and this
+  feature exists to remove ambiguity, not add it. Validated against the real UAT budget:
+  across ~430 transactions the rule proposed exactly 3 pairs, all genuine settlements, no
+  false-positive flood despite recurring round amounts like rent.
+- **One shared eligibility check** (`transferLinkBlocker`) backs both the candidate search
+  and the link itself, so the button the UI offers and the rule the API enforces can't
+  drift apart — the candidate endpoint returns `{ candidates: [], blocked: <reason> }`
+  rather than silently offering nothing.
+- **Unlink is included**, and works on any transfer, not just links this endpoint made —
+  mis-linking shouldn't be a trap whose only exit is deleting imported rows. Worth knowing
+  the asymmetry: deleting one leg of a transfer cascades to delete *both*
+  (`softDeleteTransactionCascade`), whereas unlinking leaves both rows intact as ordinary
+  transactions.
+- No migration, no schema change — `transactions.transfer_transaction_id`/
+  `transfer_account_id` already existed; linking just sets them on rows that already exist.
+
 ---
 
 ## Roadmap
@@ -757,11 +795,11 @@ payee→category frequency (rules today are explicit, never inferred from histor
 column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
 (structured, carries FITID); PDF last. Uploads land in R2, parsing runs through Queues for
 anything large. `import_batches` tracks a run; `transactions.import_id` makes re-imports
-idempotent. Auto-matching a Splitwise settlement to its bank transaction as a transfer would
-need cross-account amount/date matching — the same machinery this transfer-detection line
-already calls for, so it's deferred here rather than duplicated. Transfer detection matches
-amount and date across accounts and links the pair — which, when the two accounts hold
-different currencies, is precisely the cross-currency case below.
+idempotent. ~~Auto-matching a Splitwise settlement to its bank transaction as a transfer
+would need cross-account amount/date matching.~~ **Landed in PR 14** — suggested matches
+plus manual linking of two already-imported rows (see below). Still to come there: doing it
+automatically at import time rather than on request, and the cross-currency case (PR 14
+requires both legs in the same currency), which is precisely the Phase 5 work below.
 
 **Phase 5 — Full multi-currency.** Multi-currency accounts in the UI. `budget_amount_minor`
 starts carrying real conversions. Effective rate on a transfer derived from the two legs.

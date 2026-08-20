@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lte, ne } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
@@ -12,6 +12,7 @@ import {
 import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
 import { getDb, type Db } from '../db/client';
 import { accounts, categories, payees, transactions } from '../db/schema';
+import { addDays } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import { parseAmountToMinor } from '../lib/money';
 import type { AppEnv } from '../types/hono';
@@ -342,6 +343,230 @@ transactionsRoute.delete('/:transactionId', requireBudgetMember('editor'), async
   if (!existing) return c.json({ error: 'not_found' }, 404);
 
   await softDeleteTransactionCascade(db, transactionId, Date.now());
+  return c.json({ status: 'ok' });
+});
+
+// ---------------------------------------------------------------------------
+// Linking two ALREADY-EXISTING transactions as a transfer.
+//
+// The create path above builds a transfer as a fresh pair of rows. That
+// can't help when both halves already exist — the common case being two
+// statement imports of the same real money movement: a Venmo outflow on a
+// bank account and the matching settlement inflow on the Splitwise
+// clearing account (see src/import/splitwise.ts). Those arrive as two
+// independent uncategorized rows; this turns them into one linked event.
+//
+// Linking two UNCATEGORIZED rows between two ON-BUDGET accounts is a
+// deliberate no-op for the ledger: an uncategorized non-transfer row on an
+// on-budget account moves Ready to Assign by its amount (see
+// src/domain/ledger.ts), so an equal-and-opposite pair already nets to
+// zero; afterwards both legs hit the isTransfer branch and contribute
+// nothing at all. Same total, less ambiguity. What linking DOES buy is
+// that the pair can no longer drift apart: a stray category or payee rule
+// can't silently turn one half into spending, and a pair straddling a
+// month boundary stops distorting either month's income.
+//
+// The uncategorized requirement is enforced, not assumed — a categorized
+// leg genuinely changes the arithmetic (category activity stays, but the
+// counterpart's Ready to Assign movement disappears), so refusing is the
+// only way to keep "link" from silently moving money.
+// ---------------------------------------------------------------------------
+
+/** How far apart two rows may be dated and still be offered as a match. */
+const TRANSFER_MATCH_WINDOW_DAYS = 5;
+
+const linkTransferSchema = z.object({ otherTransactionId: z.string().min(1) });
+
+/** The columns both the candidate search and the link validation need. */
+const linkableColumns = {
+  id: transactions.id,
+  accountId: transactions.accountId,
+  date: transactions.date,
+  amountMinor: transactions.amountMinor,
+  currencyCode: transactions.currencyCode,
+  categoryId: transactions.categoryId,
+  memo: transactions.memo,
+  transferTransactionId: transactions.transferTransactionId,
+  parentTransactionId: transactions.parentTransactionId,
+  importPayeeRaw: transactions.importPayeeRaw,
+};
+
+/** True when this row is a split parent — those are never linkable (their children carry the categories). */
+async function hasSplitChildren(db: Db, transactionId: string): Promise<boolean> {
+  const children = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(and(eq(transactions.parentTransactionId, transactionId), isNull(transactions.deletedAt)))
+    .limit(1);
+  return children.length > 0;
+}
+
+/**
+ * Why a row can't take part in a link, or null when it can. Shared by the
+ * candidate search (to pick a starting row) and by the link itself (to
+ * check both sides), so the button the UI offers and the rule the API
+ * enforces can't drift apart.
+ */
+async function transferLinkBlocker(
+  db: Db,
+  row: { id: string; transferTransactionId: string | null; parentTransactionId: string | null; categoryId: string | null },
+): Promise<string | null> {
+  if (row.transferTransactionId !== null) return 'already_a_transfer';
+  if (row.parentTransactionId !== null) return 'is_a_split_child';
+  if (row.categoryId !== null) return 'is_categorized';
+  if (await hasSplitChildren(db, row.id)) return 'is_a_split';
+  return null;
+}
+
+// Candidate matches for one transaction: the opposite amount, in a
+// different account, dated within TRANSFER_MATCH_WINDOW_DAYS, and itself
+// linkable. Exact-amount only — a near-miss match on money is a guess, and
+// this feature exists to remove ambiguity, not add it.
+transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
+  const budgetId = budgetIdParam(c);
+  const transactionId = c.req.param('transactionId');
+  const db = getDb(c.env);
+
+  const [row] = await db
+    .select(linkableColumns)
+    .from(transactions)
+    .where(and(eq(transactions.id, transactionId), eq(transactions.budgetId, budgetId), isNull(transactions.deletedAt)))
+    .limit(1);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+
+  const blocker = await transferLinkBlocker(db, row);
+  if (blocker) return c.json({ candidates: [], blocked: blocker });
+
+  const earliest = addDays(row.date, -TRANSFER_MATCH_WINDOW_DAYS);
+  const latest = addDays(row.date, TRANSFER_MATCH_WINDOW_DAYS);
+
+  const rows = await db
+    .select({ ...linkableColumns, accountName: accounts.name })
+    .from(transactions)
+    .innerJoin(accounts, eq(accounts.id, transactions.accountId))
+    .where(
+      and(
+        eq(transactions.budgetId, budgetId),
+        isNull(transactions.deletedAt),
+        isNull(transactions.transferTransactionId),
+        isNull(transactions.parentTransactionId),
+        isNull(transactions.categoryId),
+        ne(transactions.accountId, row.accountId),
+        eq(transactions.amountMinor, -row.amountMinor),
+        eq(transactions.currencyCode, row.currencyCode),
+        gte(transactions.date, earliest),
+        lte(transactions.date, latest),
+      ),
+    )
+    .orderBy(asc(transactions.date))
+    .limit(20);
+
+  // A split parent has no parentTransactionId of its own, so it survives
+  // the query above — filter it out here, where the child lookup lives.
+  const candidates = [];
+  for (const candidate of rows) {
+    if (await hasSplitChildren(db, candidate.id)) continue;
+    candidates.push({
+      id: candidate.id,
+      accountId: candidate.accountId,
+      accountName: candidate.accountName,
+      date: candidate.date,
+      amountMinor: candidate.amountMinor,
+      memo: candidate.memo,
+      importPayeeRaw: candidate.importPayeeRaw,
+    });
+  }
+
+  return c.json({ candidates });
+});
+
+transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('editor'), async (c) => {
+  const budgetId = budgetIdParam(c);
+  const transactionId = c.req.param('transactionId');
+  const parsed = linkTransferSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
+  const { otherTransactionId } = parsed.data;
+  if (otherTransactionId === transactionId) return c.json({ error: 'cannot_link_to_self' }, 400);
+
+  const db = getDb(c.env);
+  const rows = await db
+    .select(linkableColumns)
+    .from(transactions)
+    .where(
+      and(
+        inArray(transactions.id, [transactionId, otherTransactionId]),
+        eq(transactions.budgetId, budgetId),
+        isNull(transactions.deletedAt),
+      ),
+    );
+  const first = rows.find((r) => r.id === transactionId);
+  const second = rows.find((r) => r.id === otherTransactionId);
+  if (!first || !second) return c.json({ error: 'not_found' }, 404);
+
+  for (const row of [first, second]) {
+    const blocker = await transferLinkBlocker(db, row);
+    if (blocker) return c.json({ error: blocker }, 400);
+  }
+
+  if (first.accountId === second.accountId) return c.json({ error: 'same_account' }, 400);
+  if (first.currencyCode !== second.currencyCode) return c.json({ error: 'currency_mismatch' }, 400);
+  // Exact opposites. Also rejects a 0/0 pair, which is not a transfer of
+  // anything and would link two unrelated rows on a technicality.
+  if (first.amountMinor !== -second.amountMinor || first.amountMinor === 0) {
+    return c.json({ error: 'amounts_do_not_offset' }, 400);
+  }
+
+  const [firstAccount] = await db.select().from(accounts).where(eq(accounts.id, first.accountId)).limit(1);
+  const [secondAccount] = await db.select().from(accounts).where(eq(accounts.id, second.accountId)).limit(1);
+  if (!firstAccount || !secondAccount) return c.json({ error: 'invalid_account' }, 400);
+
+  const now = Date.now();
+  // Each leg's payee names the OTHER account, matching what the create
+  // path builds (see getOrCreateTransferPayee) so a linked transfer is
+  // indistinguishable from one entered as a transfer in the first place.
+  const firstPayeeId = await getOrCreateTransferPayee(db, budgetId, secondAccount.id, secondAccount.name, now);
+  const secondPayeeId = await getOrCreateTransferPayee(db, budgetId, firstAccount.id, firstAccount.name, now);
+
+  await db
+    .update(transactions)
+    .set({ transferTransactionId: second.id, transferAccountId: second.accountId, payeeId: firstPayeeId, updatedAt: now })
+    .where(eq(transactions.id, first.id));
+  await db
+    .update(transactions)
+    .set({ transferTransactionId: first.id, transferAccountId: first.accountId, payeeId: secondPayeeId, updatedAt: now })
+    .where(eq(transactions.id, second.id));
+
+  return c.json({ status: 'ok' });
+});
+
+// Undoes a link, leaving both rows exactly as ordinary transactions again
+// (payee cleared along with the link, since a "Transfer : X" payee on an
+// unlinked row would be a lie). Deliberately available for links this
+// endpoint didn't create too — a transfer entered by hand can be split
+// back apart without deleting and re-entering both halves.
+transactionsRoute.post('/:transactionId/unlink-transfer', requireBudgetMember('editor'), async (c) => {
+  const budgetId = budgetIdParam(c);
+  const transactionId = c.req.param('transactionId');
+  const db = getDb(c.env);
+
+  const [row] = await db
+    .select({ id: transactions.id, transferTransactionId: transactions.transferTransactionId })
+    .from(transactions)
+    .where(and(eq(transactions.id, transactionId), eq(transactions.budgetId, budgetId), isNull(transactions.deletedAt)))
+    .limit(1);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if (row.transferTransactionId === null) return c.json({ error: 'not_a_transfer' }, 400);
+
+  const now = Date.now();
+  const clearLink = { transferTransactionId: null, transferAccountId: null, payeeId: null, updatedAt: now };
+  await db.update(transactions).set(clearLink).where(eq(transactions.id, row.id));
+  // The sibling may already be gone (deleting one leg cascades to the
+  // other) — scoping by budget keeps this from touching anything else.
+  await db
+    .update(transactions)
+    .set(clearLink)
+    .where(and(eq(transactions.id, row.transferTransactionId), eq(transactions.budgetId, budgetId)));
+
   return c.json({ status: 'ok' });
 });
 

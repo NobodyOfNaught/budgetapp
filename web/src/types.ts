@@ -170,6 +170,21 @@ export interface ImportSummary {
   accountsCreated: string[];
 }
 
+/**
+ * A row that could be the other half of this one, from
+ * GET .../transactions/:id/transfer-candidates — opposite amount, different
+ * account, dated within a few days. See src/routes/transactions.ts.
+ */
+export interface TransferCandidate {
+  id: string;
+  accountId: string;
+  accountName: string;
+  date: string;
+  amountMinor: number;
+  memo: string | null;
+  importPayeeRaw: string | null;
+}
+
 /** One past import run — GET .../imports. What DELETE .../imports/:batchId undoes. */
 export interface ImportBatch {
   id: string;

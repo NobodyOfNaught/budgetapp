@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { apiFetch } from '../api';
+import { IMPORT_PROVIDER_OPTIONS } from '../providers';
 import type { Account } from '../types';
 
 /** Micros (accounts.fxRateMicros) back to a plain decimal string, e.g. 730000 -> "0.73". Mirrors ImportForm's formatFxRate. */
@@ -17,6 +18,9 @@ function formatFxRate(micros: number): string {
  *   resolveCurrencyAccount in src/routes/imports.ts), so a later rename of
  *   the primary leaves the pair mismatched with no way to fix it. Renaming
  *   a credit account also renames its payment category, server-side.
+ * - **Which statement parser its files use.** Settable when creating the
+ *   account (PR 7) but not afterwards until now — so an account set up
+ *   before a provider existed, or pointed at the wrong one, was stuck.
  * - **Exchange rate**, for an account whose currency isn't the budget's.
  *   Previously settable only when CREATING an account or while running an
  *   import into it, which left an existing account like an auto-created
@@ -43,6 +47,7 @@ export function AccountSettings({
 }) {
   const [name, setName] = useState(account.name);
   const [fxRate, setFxRate] = useState(account.fxRateMicros != null ? formatFxRate(account.fxRateMicros) : '');
+  const [importProvider, setImportProvider] = useState(account.importProvider ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +62,8 @@ export function AccountSettings({
         method: 'PATCH',
         body: JSON.stringify({
           name: name.trim(),
+          // Empty means "no parser" — null, not omitted, so it can be cleared.
+          importProvider: importProvider || null,
           // An emptied field means "forget the rate" — null, not omitted,
           // since omitting leaves the stored one untouched.
           ...(isForeign ? { fxRate: fxRate.trim() || null } : {}),
@@ -75,6 +82,19 @@ export function AccountSettings({
       <div>
         <label>
           Name <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+        </label>
+      </div>
+      <div style={{ marginTop: '0.5rem' }}>
+        <label>
+          Statement files from{' '}
+          <select value={importProvider} onChange={(e) => setImportProvider(e.target.value)}>
+            <option value="">(none — manual entry)</option>
+            {IMPORT_PROVIDER_OPTIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
       {isForeign && (

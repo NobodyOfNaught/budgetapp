@@ -397,6 +397,94 @@ describe('budgetable foreign-currency accounts: manual entry converts budgetAmou
   });
 });
 
+// Documents the ONE correct shape for paying a credit card, because two
+// plausible-looking alternatives silently give the wrong answer and
+// nothing in the UI steers you. See docs/plan.md's income/RTA notes.
+describe('paying a credit card: the shape that actually drains the earmark', () => {
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const card = await createAccount(app, sessionCookie, budgetId, { name: 'Visa', type: 'credit_card' });
+    const groceries = await firstCategoryId(app, sessionCookie, budgetId);
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; linkedAccountId: string | null }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const paymentCat = cats.groups.flatMap((g) => g.categories).find((c) => c.linkedAccountId === card)!.id;
+
+    // $50 of groceries on the card in March -> $50 earmarked in Payment.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-05', amount: '-50.00', categoryId: groceries }),
+    });
+    return { app, sessionCookie, budgetId, checking, card, paymentCat };
+  }
+
+  async function paymentAvailable(
+    app: Awaited<ReturnType<typeof signInNewUser>>['app'],
+    cookie: string,
+    budgetId: string,
+    paymentCat: string,
+  ) {
+    const { body } = await callJson<{ categories: Record<string, { available: number }> }>(
+      app,
+      cookie,
+      `/api/v1/budgets/${budgetId}/months/2026-03`,
+    );
+    return body.categories[paymentCat]?.available;
+  }
+
+  it('a LINKED transfer whose outflow leg is categorized to Payment drains it to zero', async () => {
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-correct@example.com');
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(5000);
+
+    // Both halves arrive as separate imported rows, so they start
+    // uncategorized — linking REQUIRES that (is_categorized is a 400).
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inn.transactionId }),
+    });
+    // ...then categorize the OUTFLOW leg. Order matters: link first
+    // (needs both uncategorized), categorize second.
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ categoryId: paymentCat }),
+    });
+    expect(status).toBe(200);
+
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
+  });
+
+  it('the same two rows left UNLINKED leave the earmark stranded at its full value', async () => {
+    // The trap: each row looks individually reasonable, and the account
+    // balances are right, but the card-side inflow is uncategorized on a
+    // credit account so the ledger routes it INTO Payment (+50), exactly
+    // cancelling the outflow leg's -50. Payment still reads $50 owed-and-
+    // funded for a card that has already been paid.
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-unlinked@example.com');
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00', categoryId: paymentCat }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
+    });
+
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(5000); // NOT 0
+  });
+});
+
 describe('transfers', () => {
   it('creates both legs, linked, with correct opposite-signed amounts, visible in each account’s register', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('txn-transfer-create@example.com');

@@ -947,6 +947,32 @@ automatically and the same file imports 6/7 correctly. No component test harness
 this repo (only backend Vitest) — verification here follows the established real-browser
 smoke-test convention rather than introducing one for a three-line fix.
 
+**Changing an account's statement provider after creation.** Same shape as the rename/rate
+gap above and missed in the same pass: `import_provider` was settable at creation
+(`AccountForm`) but `updateAccountSchema` never accepted it, so an account pointed at the
+wrong parser — or created before its provider existed — was stuck. Now editable in
+`AccountSettings` (null clears it, omitting leaves it alone), and the provider list itself
+moved to a shared `web/src/providers.ts`, since it was duplicated between `AccountForm`'s
+inline `<option>`s and `ImportForm`'s `PROVIDERS` array. That duplication is precisely why
+adding Neo meant remembering two places, and why a third picker would otherwise have been a
+fourth chance to drift.
+
+**Documenting the one correct shape for paying a credit card**
+(`test/transactions.test.ts`). Prompted by a question about income handling, and worth
+pinning because two plausible-looking alternatives silently disagree, with nothing in the
+UI to steer between them:
+
+- **Correct:** a linked transfer whose *outflow* (checking-side) leg is categorized to the
+  card's payment category. Drains the earmark to zero. Note the required ORDER —
+  `link-transfer` refuses a categorized row (`is_categorized` is a 400), so the two rows
+  must be linked while still uncategorized and the outflow leg categorized *afterwards*.
+- **The trap:** the same two rows left UNLINKED, outflow categorized to Payment. Each row
+  looks individually reasonable and both account balances come out right, but the card-side
+  inflow is uncategorized on a credit account, so `accumulateMonth`'s `isCredit` branch
+  routes it straight INTO the payment category (+50), exactly cancelling the outflow leg's
+  −50. Payment still reads as fully funded for a card that has already been paid. Both
+  behaviours are now asserted, so the difference can't silently regress.
+
 ---
 
 ## Roadmap

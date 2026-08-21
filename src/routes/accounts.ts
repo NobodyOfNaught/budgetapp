@@ -46,6 +46,8 @@ const updateAccountSchema = z.object({
   closed: z.boolean().optional(),
   /** Updates or clears (null) the account's remembered exchange rate — see createAccountSchema's fxRate. Does not retroactively re-convert existing transactions or change onBudget. */
   fxRate: z.string().trim().nullable().optional(),
+  /** Updates or clears (null) which statement parser this account's files use — settable at creation since PR 7, but not changeable afterwards until now. */
+  importProvider: z.string().trim().min(1).max(40).nullable().optional(),
 });
 
 export const accountsRoute = new Hono<AppEnv>();
@@ -195,6 +197,7 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
       sortOrder: input.sortOrder ?? existing.sortOrder,
       closedAt: input.closed === undefined ? existing.closedAt : input.closed ? now : null,
       fxRateMicros,
+      importProvider: input.importProvider === undefined ? existing.importProvider : input.importProvider,
       updatedAt: now,
     })
     .where(eq(accounts.id, accountId));

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { apiFetch } from '../api';
+import { IMPORT_PROVIDER_OPTIONS } from '../providers';
 import type { AccountType } from '../types';
 
 const ACCOUNT_TYPES: { value: AccountType; label: string }[] = [
@@ -123,11 +124,11 @@ export function AccountForm({
           Statement files from{' '}
           <select value={importProvider} onChange={(e) => setImportProvider(e.target.value)}>
             <option value="">(none — manual entry)</option>
-            <option value="wise">Wise</option>
-            <option value="becu">BECU</option>
-            <option value="splitwise">Splitwise</option>
-            <option value="aacu">AACU</option>
-            <option value="neo">Neo Mastercard</option>
+            {IMPORT_PROVIDER_OPTIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
           </select>
         </label>
       </div>

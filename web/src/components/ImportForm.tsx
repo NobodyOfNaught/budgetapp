@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
+import { IMPORT_PROVIDER_OPTIONS } from '../providers';
 import type { Account, ImportBatch, ImportSummary } from '../types';
-
-const PROVIDERS: { value: string; label: string }[] = [
-  { value: 'wise', label: 'Wise' },
-  { value: 'becu', label: 'BECU' },
-  { value: 'splitwise', label: 'Splitwise' },
-  { value: 'aacu', label: 'AACU' },
-  { value: 'neo', label: 'Neo Mastercard' },
-];
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
 function savedMembers(account: Account | undefined): string[] {
@@ -326,7 +319,7 @@ export function ImportForm({
           <label>
             From{' '}
             <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-              {PROVIDERS.map((p) => (
+              {IMPORT_PROVIDER_OPTIONS.map((p) => (
                 <option key={p.value} value={p.value}>
                   {p.label}
                 </option>

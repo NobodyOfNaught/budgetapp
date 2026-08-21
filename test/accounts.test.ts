@@ -325,6 +325,46 @@ describe('foreign currency + exchange rate', () => {
     expect(cadAccounts.results[0]).toMatchObject({ id: subAccount.id, name: 'Wise (CAD)', fx_rate_micros: 720000 });
   });
 
+  it('PATCH changes which statement parser the account uses, and can clear it', async () => {
+    // Settable at creation since PR 7 but not afterwards — an account set
+    // up before a provider existed, or pointed at the wrong one, was stuck.
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-patch-provider@example.com');
+    const { body: created } = await callJson<{ account: { id: string } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', importProvider: 'wise' }) },
+    );
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ importProvider: 'neo' }),
+    });
+    let row = await env.DB.prepare('select import_provider from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ import_provider: string | null }>();
+    expect(row?.import_provider).toBe('neo');
+
+    // Omitting it leaves it alone; null clears it.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Neo Mastercard' }),
+    });
+    row = await env.DB.prepare('select import_provider from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ import_provider: string | null }>();
+    expect(row?.import_provider).toBe('neo');
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ importProvider: null }),
+    });
+    row = await env.DB.prepare('select import_provider from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ import_provider: string | null }>();
+    expect(row?.import_provider).toBeNull();
+  });
+
   it('PATCH rejects an invalid exchange rate', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-invalid@example.com');
     const { body: created } = await callJson<{ account: { id: string } }>(

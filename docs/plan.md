@@ -930,6 +930,23 @@ defects, both fixed:
   can return; fixing only the message would have left comma-decimal rates rejected. Both
   landed together.
 
+**A third bug, same session, same root cause pattern: the "From" provider dropdown didn't
+default to the account's own remembered provider.** `ImportForm.tsx`'s `provider` state was
+hardcoded to `useState('wise')` and never read `account.importProvider` — even though the
+account carries it from creation (`AccountForm.tsx`) and the exchange-rate field right next
+to it already does exactly this (pre-fills from `account.fxRateMicros` on account switch —
+see PR 15's notes above). Confirmed live: importing the real July Neo file with the dropdown
+left on its default sent it through `src/import/wise.ts` instead, which doesn't error — it
+just finds none of its own columns and skips every row with `"missing an id or a date"` (a
+real Wise skip reason, not one of Neo's), which reads exactly like a corrupt file rather than
+the wrong parser being picked. Fixed with a third account-switch effect mirroring the
+existing members/fxRate ones, pre-filling `provider` from `account.importProvider ?? 'wise'`.
+Verified with a real-browser reproduction: without the fix, the dropdown reads `wise` after
+picking the Neo account and the import silently mis-parses; with it, `From` reads `neo`
+automatically and the same file imports 6/7 correctly. No component test harness exists in
+this repo (only backend Vitest) — verification here follows the established real-browser
+smoke-test convention rather than introducing one for a three-line fix.
+
 ---
 
 ## Roadmap

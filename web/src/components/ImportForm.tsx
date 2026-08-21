@@ -159,6 +159,20 @@ export function ImportForm({
     setFxRate(account?.fxRateMicros != null ? formatFxRate(account.fxRateMicros) : '');
   }, [accountId]);
 
+  // Pre-fill "From" with the account's own remembered provider
+  // (accounts.import_provider, set at account creation — see
+  // AccountForm.tsx), same account-switch trigger as the two effects
+  // above. Without this the dropdown defaulted to 'wise' on every fresh
+  // mount of this form regardless of which account was picked — a real
+  // failure mode: a Neo CSV run through the Wise parser doesn't error, it
+  // just finds none of Wise's own columns and skips every row with
+  // "missing an id or a date", which reads like a broken file rather than
+  // the wrong provider being selected.
+  useEffect(() => {
+    const account = importable.find((a) => a.id === accountId);
+    setProvider(account?.importProvider ?? 'wise');
+  }, [accountId]);
+
   function toggleMember(name: string) {
     setSelectedMembers((prev) => {
       const next = new Set(prev);

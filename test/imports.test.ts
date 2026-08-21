@@ -1,3 +1,4 @@
+import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { callJson, resetDb, signInNewUser } from './helpers';
 
@@ -272,14 +273,19 @@ describe('budgetable foreign-currency import', () => {
     });
     expect(created.account.onBudget).toBe(true);
 
-    // Clear the rate without touching onBudget — PATCH deliberately doesn't
-    // recompute it retroactively (see src/routes/accounts.ts), which is
-    // exactly the state that must be blocked at import time: an on-budget
-    // account with nothing honest to convert with.
-    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ fxRate: null }),
-    });
+    // Strip the rate directly in the DB, NOT through the API: PATCH now
+    // refuses to leave a foreign account on-budget with no rate
+    // (needs_fx_rate_to_budget), so this state is no longer reachable
+    // through any route. It remains reachable in DATA — any account that
+    // predates that guardrail — which is exactly why the import-time check
+    // has to stay. Same posture as test/months.test.ts inserting an
+    // income-kind category with raw SQL to prove its defensive check
+    // fires rather than merely being unreachable.
+    await env.DB.prepare('update accounts set fx_rate_micros = null where id = ?').bind(created.account.id).run();
+    const stranded = await env.DB.prepare('select on_budget, fx_rate_micros from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ on_budget: number; fx_rate_micros: number | null }>();
+    expect(stranded).toMatchObject({ on_budget: 1, fx_rate_micros: null }); // the state under test really exists
 
     const { status, body } = await importCsv(app, sessionCookie, budgetId, created.account.id, csv(TIM_HORTONS_CAD));
     expect(status).toBe(400);

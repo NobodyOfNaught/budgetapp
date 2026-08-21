@@ -18,6 +18,11 @@ function formatFxRate(micros: number): string {
  *   resolveCurrencyAccount in src/routes/imports.ts), so a later rename of
  *   the primary leaves the pair mismatched with no way to fix it. Renaming
  *   a credit account also renames its payment category, server-side.
+ * - **Budget vs Tracking.** Without this an account could never move
+ *   after creation, which silently stranded a budgeted foreign credit
+ *   card off-budget when its rate arrived after the fact — its payment
+ *   category present but inert, since the ledger skips off-budget
+ *   accounts entirely.
  * - **Which statement parser its files use.** Settable when creating the
  *   account (PR 7) but not afterwards until now — so an account set up
  *   before a provider existed, or pointed at the wrong one, was stuck.
@@ -48,6 +53,7 @@ export function AccountSettings({
   const [name, setName] = useState(account.name);
   const [fxRate, setFxRate] = useState(account.fxRateMicros != null ? formatFxRate(account.fxRateMicros) : '');
   const [importProvider, setImportProvider] = useState(account.importProvider ?? '');
+  const [onBudget, setOnBudget] = useState(account.onBudget);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -62,6 +68,7 @@ export function AccountSettings({
         method: 'PATCH',
         body: JSON.stringify({
           name: name.trim(),
+          onBudget,
           // Empty means "no parser" — null, not omitted, so it can be cleared.
           importProvider: importProvider || null,
           // An emptied field means "forget the rate" — null, not omitted,
@@ -71,7 +78,11 @@ export function AccountSettings({
       });
       onSaved();
     } catch {
-      setError('Could not save that — check the name and the exchange rate.');
+      setError(
+        isForeign && onBudget && !fxRate.trim()
+          ? `An account in ${account.currencyCode} needs an exchange rate before it can be part of the budget.`
+          : 'Could not save that — check the name and the exchange rate.',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -83,6 +94,16 @@ export function AccountSettings({
         <label>
           Name <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
         </label>
+      </div>
+      <div style={{ marginTop: '0.5rem' }}>
+        <label>
+          <input type="checkbox" checked={onBudget} onChange={(e) => setOnBudget(e.target.checked)} /> Part of the budget
+        </label>
+        <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+          {onBudget
+            ? 'Its transactions land in your categories and its balance counts toward Ready to Assign.'
+            : 'Tracking only — its balance shows in net worth, but nothing here touches your categories.'}
+        </p>
       </div>
       <div style={{ marginTop: '0.5rem' }}>
         <label>

@@ -244,25 +244,37 @@ describe('foreign currency + exchange rate', () => {
     expect(row?.on_budget).toBe(1); // unchanged — PATCH never recomputes onBudget
   });
 
-  it('PATCH clears the rate with fxRate: null, again leaving onBudget untouched', async () => {
+  it('PATCH clears the rate with fxRate: null on a Tracking account, leaving onBudget untouched', async () => {
+    // NOTE: this case originally created an ON-budget CAD account, cleared
+    // its rate, and asserted the account stayed on-budget with no rate.
+    // That expectation was wrong and is now refused outright
+    // (needs_fx_rate_to_budget): an on-budget foreign account with no rate
+    // is exactly the state that makes budget math dishonest — it's the
+    // same failure class as the unconverted starting balance and the
+    // missing_fx_rate import guard. Clearing a rate is only meaningful on
+    // an account that isn't being budgeted, which is what this now covers;
+    // the refusal and the drop-to-Tracking-in-one-PATCH escape hatch are
+    // asserted separately below.
     const { app, sessionCookie, budgetId } = await signInNewUser('accounts-fx-patch-clear@example.com');
-    const { body: created } = await callJson<{ account: { id: string } }>(
+    const { body: created } = await callJson<{ account: { id: string; onBudget: boolean } }>(
       app,
       sessionCookie,
       `/api/v1/budgets/${budgetId}/accounts`,
-      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }) },
+      { method: 'POST', body: JSON.stringify({ name: 'Wise (CAD)', type: 'tracking_asset', currencyCode: 'CAD', fxRate: '0.73' }) },
     );
+    expect(created.account.onBudget).toBe(false); // tracking_* defaults off-budget even with a rate
 
-    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ fxRate: null }),
     });
+    expect(status).toBe(200);
 
     const row = await env.DB.prepare('select fx_rate_micros, on_budget from accounts where id = ?')
       .bind(created.account.id)
       .first<{ fx_rate_micros: number | null; on_budget: number }>();
     expect(row?.fx_rate_micros).toBeNull();
-    expect(row?.on_budget).toBe(1); // still on-budget — the account this leaves in the "needs a rate again" state that imports.ts's missing_fx_rate guard exists for, see test/imports.test.ts
+    expect(row?.on_budget).toBe(0); // untouched by a rate-only PATCH
   });
 
   it('renaming a currency sub-account does not break which account future imports route to', async () => {
@@ -363,6 +375,98 @@ describe('foreign currency + exchange rate', () => {
       .bind(created.account.id)
       .first<{ import_provider: string | null }>();
     expect(row?.import_provider).toBeNull();
+  });
+
+  it('moves an account between Budget and Tracking after creation', async () => {
+    // Without this an account could never move: creation was the only
+    // place onBudget was ever set. That stranded a budgeted foreign credit
+    // card off-budget whenever its rate arrived after the fact.
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-toggle-onbudget@example.com');
+    const { body: created } = await callJson<{ account: { id: string; onBudget: boolean } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Investments', type: 'tracking_asset' }) },
+    );
+    expect(created.account.onBudget).toBe(false);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ onBudget: true }),
+    });
+    let row = await env.DB.prepare('select on_budget from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ on_budget: number }>();
+    expect(row?.on_budget).toBe(1);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ onBudget: false }),
+    });
+    row = await env.DB.prepare('select on_budget from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ on_budget: number }>();
+    expect(row?.on_budget).toBe(0);
+  });
+
+  it('refuses to budget a foreign-currency account that has no rate, and allows it in the same PATCH that supplies one', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-toggle-fx-guard@example.com');
+    const { body: created } = await callJson<{ account: { id: string; onBudget: boolean } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Wise (CAD)', type: 'tracking_asset', currencyCode: 'CAD' }) },
+    );
+    expect(created.account.onBudget).toBe(false);
+
+    const refused = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`,
+      { method: 'PATCH', body: JSON.stringify({ onBudget: true }) },
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe('needs_fx_rate_to_budget');
+
+    // Rate and the move together in one request is fine — the guardrail
+    // reads the rate as it will be AFTER this PATCH, not before it.
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ onBudget: true, fxRate: '0.72' }),
+    });
+    expect(status).toBe(200);
+
+    const row = await env.DB.prepare('select on_budget, fx_rate_micros from accounts where id = ?')
+      .bind(created.account.id)
+      .first<{ on_budget: number; fx_rate_micros: number }>();
+    expect(row).toMatchObject({ on_budget: 1, fx_rate_micros: 720000 });
+  });
+
+  it('refuses to clear the rate out from under an account that is still on-budget', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('accounts-toggle-clear-guard@example.com');
+    const { body: created } = await callJson<{ account: { id: string } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+      { method: 'POST', body: JSON.stringify({ name: 'Neo', type: 'credit_card', currencyCode: 'CAD', fxRate: '0.73' }) },
+    );
+
+    const refused = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`,
+      { method: 'PATCH', body: JSON.stringify({ fxRate: null }) },
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe('needs_fx_rate_to_budget');
+
+    // Dropping to Tracking in the same breath is allowed — nothing needs
+    // converting once it's out of the budget.
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${created.account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fxRate: null, onBudget: false }),
+    });
+    expect(status).toBe(200);
   });
 
   it('PATCH rejects an invalid exchange rate', async () => {

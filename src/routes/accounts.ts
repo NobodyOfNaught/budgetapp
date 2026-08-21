@@ -48,6 +48,8 @@ const updateAccountSchema = z.object({
   fxRate: z.string().trim().nullable().optional(),
   /** Updates or clears (null) which statement parser this account's files use — settable at creation since PR 7, but not changeable afterwards until now. */
   importProvider: z.string().trim().min(1).max(40).nullable().optional(),
+  /** Moves the account between Budget and Tracking. A foreign-currency account still needs a rate to be on-budget — see the guardrail below. */
+  onBudget: z.boolean().optional(),
 });
 
 export const accountsRoute = new Hono<AppEnv>();
@@ -188,6 +190,34 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
     }
   }
 
+  // Same rule creation enforces (see isBudgetable above), applied against
+  // the rate as it will be AFTER this request — so setting a rate and
+  // going on-budget in one PATCH works, and clearing the rate while
+  // staying on-budget is refused rather than silently leaving the account
+  // budgeted with nothing to convert by.
+  //
+  // Deliberately an explicit toggle rather than something inferred from
+  // the rate: a currency sub-account auto-created by an import
+  // (resolveCurrencyAccount) is off-budget by construction, and gaining a
+  // rate shouldn't silently pull it into category budgeting. But WITHOUT
+  // this field there was no way to move an account either direction after
+  // creation at all — which stranded a budgeted foreign credit card
+  // off-budget the moment its rate arrived after the fact, with its
+  // payment category present but inert (the ledger skips off-budget
+  // accounts entirely). See docs/plan.md's PR 15 notes.
+  let onBudget = existing.onBudget;
+  if (input.onBudget !== undefined) onBudget = input.onBudget;
+  if (onBudget) {
+    const [budget] = await db
+      .select({ currencyCode: budgets.currencyCode })
+      .from(budgets)
+      .where(eq(budgets.id, budgetId))
+      .limit(1);
+    if (budget && existing.currencyCode !== budget.currencyCode && fxRateMicros === null) {
+      return c.json({ error: 'needs_fx_rate_to_budget' }, 400);
+    }
+  }
+
   const now = Date.now();
   await db
     .update(accounts)
@@ -198,6 +228,7 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
       closedAt: input.closed === undefined ? existing.closedAt : input.closed ? now : null,
       fxRateMicros,
       importProvider: input.importProvider === undefined ? existing.importProvider : input.importProvider,
+      onBudget,
       updatedAt: now,
     })
     .where(eq(accounts.id, accountId));

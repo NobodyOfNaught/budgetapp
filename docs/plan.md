@@ -1011,6 +1011,34 @@ the Debits/Credits sign convention is the right way round. Opening 2519.74 → c
 net −2464.11, matching the parser's summed output to the cent.
 
 
+**Moving an account between Budget and Tracking — the gap that made the rest of PR 15 inert
+on real data.** `onBudget` was only ever set at creation; `updateAccountSchema` never
+accepted it. Harmless in a single-currency budget, but combined with PATCH deliberately not
+recomputing `onBudget` when a rate is set, it produced a trap with no exit: a foreign
+credit card created *before* its rate existed was forced off-budget at creation, stayed
+off-budget when the rate arrived, and could never be moved. Found in live UAT data — the
+Neo card sat under Tracking with `fx_rate_micros` set and a payment category present but
+completely inert, because `accumulateMonth` skips off-budget accounts before any of the
+credit-card mechanic runs. Every bit of PR 15's budgeting machinery was correct and simply
+never executing.
+
+- `onBudget` is now accepted on PATCH, with creation's guardrail re-applied against the
+  rate **as it will be after the request** — so setting a rate and going on-budget in one
+  PATCH works, and clearing a rate while staying on-budget is refused
+  (`needs_fx_rate_to_budget`) instead of silently leaving an account budgeted with nothing
+  to convert by.
+- Kept as an explicit toggle rather than inferred from the rate: an import-created currency
+  sub-account (`resolveCurrencyAccount`) is off-budget by construction, and gaining a rate
+  shouldn't quietly pull it into category budgeting.
+- **An existing test asserted the old behaviour** — clearing a rate and leaving the account
+  on-budget — and its expectation was corrected with the reasoning recorded inline, the
+  same treatment PR 7's Ready-to-Assign transfer bug got. A second test, the import-time
+  `missing_fx_rate` guard, could no longer reach its own precondition through the API once
+  this landed; rather than delete the guard (data predating the guardrail can still be in
+  that state) the test now constructs it with raw SQL, matching how `test/months.test.ts`
+  proves the income-category check fires.
+
+
 
 ## Roadmap
 

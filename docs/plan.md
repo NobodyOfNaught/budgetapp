@@ -1039,6 +1039,54 @@ never executing.
   proves the income-category check fires.
 
 
+**Vancity Visa import landed as the seventh provider** (`src/import/vancity-visa.ts`),
+driven by two real card exports (25 rows, Jun–Aug 2026, CAD). Despite the shared bank it
+has nothing in common with the Vancity chequing format — different columns, different date
+shape, different sign convention. It is a card-processor export, closer to Neo's. Five
+things are its own, all found by analyzing the real files before writing any parser code:
+
+- **The sign convention is INVERTED — relative to this app AND to Neo, the other credit
+  card here.** A purchase prints POSITIVE (`$31.36`) because the card states what you owe;
+  a payment prints NEGATIVE (`-$200.00`). This app states what the *account* is, so every
+  amount is negated. Getting this backwards crashes nothing — it silently records a year of
+  spending as income — so the suite asserts a purchase, a payment, and an interest charge
+  separately rather than only checking a total, plus a test pinning that this is the
+  opposite of Neo so the two can never be "unified" by mistake.
+- **Amounts carry a currency symbol with the minus OUTSIDE it** (`-$200.00`, never
+  `$-200.00`), so the symbol can't just be stripped from the front without losing the sign.
+- **A real transaction id at last.** `Reference Number` is the first genuine id in any bank
+  export here (BECU/AACU/Neo/Vancity chequing all needed content-derived ids). It arrives
+  wrapped in literal quotes that survive CSV unescaping, and it is *not* universal —
+  bank-generated rows like `PURCHASE INT. CHARGED` have none — so the content-derived
+  fallback stays for those, with the two id shapes prefixed (`ref|` / `gen|`) so they can
+  never collide.
+- **The merchant category is a real provider category** — first bank export here to supply
+  one. Only confident mappings are made; `Drug Stores and Pharmacies` deliberately returns
+  null rather than being forced into the seeded set, because a wrong auto-category lands
+  already-categorized in the review queue and is easy to approve without noticing. One
+  value carries a trailing non-breaking space, which `.trim()` handles and a test pins.
+- **Bank-generated rows spill their text into `Merchant City`**: the merchant name is capped
+  near 25 characters, so `PAYMENT RECEIVED -- THANK YOU` arrives as name=`PAYMENT RECEIVED
+  -- THANK` plus city=`YOU`. Real merchants have a real city there, so the rejoin is gated
+  on the row having neither a category nor a country — the signature of a row the bank wrote
+  itself rather than a payment terminal.
+
+Verified against the untouched real files (not just the transcribed fixtures) by embedding
+their exact bytes: 25 rows in, 25 imported, 0 skipped, all CAD, netting `+$37.71` — matching
+an independent analysis of the raw files done before the parser existed.
+
+**A BOM guard added to the shared CSV reader while doing it, and worth being precise about
+what it is.** These exports are UTF-8-with-BOM on disk. A surviving BOM would sit before the
+first field's opening quote, so the first column's *header* parses as `"\ufeffDate"`, every
+`record['Date']` lookup misses, and a perfectly good file reads as "every row skipped:
+unrecognized date" — silent and total, with no hint why. It turns out **the browser upload
+path already strips it**: `Blob.text()` performs "UTF-8 decode" per the Encoding Standard,
+which removes a leading BOM, and this was confirmed rather than assumed. So the guard in
+`parseCsv` is defensive for paths that don't go through `Blob.text()` (a server-side read, a
+different client, a raw fetch), not a fix for an observed break. Cheap, and a file-level
+artifact rather than any one bank's quirk, so it belongs in the reader.
+
+
 
 ## Roadmap
 
@@ -1055,7 +1103,8 @@ Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the sa
 see each other's edits.
 
 **Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, PR 13, and PR 15* —
-per-provider CSV parsers (Wise, BECU, Splitwise, AACU, Neo Mastercard, Vancity),
+per-provider CSV parsers (Wise, BECU, Splitwise, AACU, Neo Mastercard, Vancity chequing,
+Vancity Visa),
 an approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
 heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
 as a net-position clearing account with per-import member selection (see PR 10's notes

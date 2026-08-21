@@ -13,8 +13,26 @@ export function parseCsv(text: string): string[][] {
   let inQuotes = false;
   let i = 0;
 
-  // Normalise line endings up front rather than branching on \r everywhere.
-  const src = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  // Normalise line endings up front rather than branching on \r everywhere,
+  // and drop a leading UTF-8 BOM.
+  //
+  // The BOM strip is defensive, not a fix for an observed break: real
+  // exports do carry one (Vancity's Visa history is UTF-8-with-BOM), but
+  // the browser upload path decodes via Blob.text(), and "UTF-8 decode"
+  // per the Encoding Standard already removes it — so today it never
+  // reaches here. It is guarded anyway because the failure mode is
+  // silent and total rather than loud: a surviving BOM sits before the
+  // first field's opening quote, so the first column's HEADER parses as
+  // "\ufeffDate", every `record['Date']` lookup misses, and a perfectly
+  // good file reads as "every row skipped: unrecognized date" with no
+  // hint why. Any path that doesn't go through Blob.text() (a
+  // server-side read, a different client, a raw fetch) would hit exactly
+  // that. Cheap here, and a file-level artifact rather than any one
+  // bank's quirk, so it belongs in the reader rather than a parser.
+  const src = text
+    .replace(/^\ufeff/, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
 
   const endField = () => {
     row.push(field);

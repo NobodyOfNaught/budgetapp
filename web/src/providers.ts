@@ -13,5 +13,6 @@ export const IMPORT_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: 'splitwise', label: 'Splitwise' },
   { value: 'aacu', label: 'AACU' },
   { value: 'neo', label: 'Neo Mastercard' },
-  { value: 'vancity', label: 'Vancity' },
+  { value: 'vancity', label: 'Vancity (chequing)' },
+  { value: 'vancity_visa', label: 'Vancity Visa' },
 ];

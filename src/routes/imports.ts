@@ -65,6 +65,15 @@ const importSchema = z.object({
   // directly rather than inside the importOptions JSON blob. See
   // src/routes/accounts.ts's fxRate handling, which this mirrors.
   fxRate: z.string().trim().optional(),
+  // 'YYYY-MM-DD'. Rows dated before this are skipped instead of written.
+  // Like fxRate, a budget property rather than a parser choice: supplying
+  // one both applies it to THIS import and remembers it on the budget as
+  // the default for every later one. Explicit null clears it.
+  cutoffDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
+    .nullable()
+    .optional(),
 });
 
 const inspectSchema = z.object({
@@ -326,7 +335,11 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   }
 
   const db = getDb(c.env);
-  const [budget] = await db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1);
+  const [budget] = await db
+    .select({ currencyCode: budgets.currencyCode, importCutoffDate: budgets.importCutoffDate })
+    .from(budgets)
+    .where(eq(budgets.id, budgetId))
+    .limit(1);
   if (!budget) return c.json({ error: 'not_found' }, 404);
 
   const [primaryAccount] = await db
@@ -373,6 +386,46 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     parseResult = parseStatement(provider, input.csv, input.options);
   } catch {
     return c.json({ error: 'could_not_parse_file' }, 400);
+  }
+
+  // A cutoff typed in for THIS import overrides (and, below, updates) the
+  // one remembered on the budget; otherwise fall back to that remembered
+  // one. Explicit null means "clear it", which is distinct from omitting
+  // the field — hence the `!== undefined` test rather than a truthiness
+  // check. Same shape as the fxRate handling above.
+  const effectiveCutoffDate = input.cutoffDate !== undefined ? input.cutoffDate : budget.importCutoffDate;
+
+  // Drop everything dated before the cutoff, BEFORE any account is
+  // resolved or any row written — a bank export routinely carries far
+  // more history than the window the user actually wanted, and every one
+  // of those rows would otherwise land as a real transaction moving
+  // balances and Ready to Assign.
+  //
+  // Skipped rather than silently dropped: they join parseResult.skipped
+  // with a reason naming the cutoff, so the import summary says what
+  // happened and why. A guard that quietly discards data is its own kind
+  // of bug — the same reasoning as the parsers' own skip reporting (see
+  // src/import/wise.ts).
+  let beforeCutoff = 0;
+  if (effectiveCutoffDate !== null && effectiveCutoffDate !== undefined) {
+    const cutoff = effectiveCutoffDate;
+    const kept = [];
+    for (const row of parseResult.rows) {
+      // Plain string comparison: both sides are 'YYYY-MM-DD', which sorts
+      // lexicographically exactly as it does chronologically. The cutoff
+      // date itself is KEPT — "prior to which it will not import" — so
+      // setting it to the budget's start date imports that day's rows.
+      if (row.date >= cutoff) {
+        kept.push(row);
+        continue;
+      }
+      beforeCutoff++;
+      parseResult.skipped.push({
+        reference: row.kind === 'ordinary' ? (row.payeeRaw ?? row.payeeName ?? row.importId) : row.importId,
+        reason: `dated ${row.date}, before the ${cutoff} cutoff`,
+      });
+    }
+    parseResult.rows = kept;
   }
 
   const now = Date.now();
@@ -558,12 +611,23 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     await db.update(accounts).set(patch).where(eq(accounts.id, primaryAccount.id));
   }
 
+  // The cutoff is remembered on the BUDGET, not the account: "before I
+  // started budgeting" is one date for the whole budget, and making it a
+  // per-account setting would mean re-establishing it for every new
+  // account — the same forgetting this exists to prevent.
+  if (input.cutoffDate !== undefined && input.cutoffDate !== budget.importCutoffDate) {
+    await db.update(budgets).set({ importCutoffDate: input.cutoffDate }).where(eq(budgets.id, budgetId));
+  }
+
   return c.json(
     {
       batchId,
       rowCount: parseResult.rowCount,
       imported,
       duplicates,
+      /** How many rows the cutoff held back, and the cutoff that did it — reported separately from `skipped` so the UI can call it out as the deliberate guard it is, not a parsing problem. */
+      beforeCutoff,
+      cutoffDate: effectiveCutoffDate ?? null,
       skipped: parseResult.skipped,
       accountsCreated: [...accountByCurrency.values()].filter((a) => a.created).map((a) => a.name),
     },

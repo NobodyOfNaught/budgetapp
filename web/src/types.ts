@@ -16,6 +16,15 @@ export interface BudgetSummary {
   role: 'owner' | 'editor' | 'viewer';
 }
 
+/** GET /budgets/:budgetId — the single budget, with settings the list endpoint doesn't carry. */
+export interface BudgetDetail {
+  id: string;
+  name: string;
+  currencyCode: string;
+  /** 'YYYY-MM-DD', or null for no cutoff. Statement rows dated before it are skipped at import. */
+  importCutoffDate: string | null;
+}
+
 export interface MeResponse {
   user: CurrentUser;
   budgets: BudgetSummary[];
@@ -167,6 +176,13 @@ export interface ImportSummary {
   rowCount: number;
   imported: number;
   duplicates: number;
+  /**
+   * Rows held back by the import cutoff, and the cutoff that did it.
+   * Reported apart from `skipped` because it's a guard working as asked,
+   * not a row the parser couldn't handle. See src/routes/imports.ts.
+   */
+  beforeCutoff: number;
+  cutoffDate: string | null;
   skipped: ImportSkippedRow[];
   /** Currency sub-accounts the file turned out to need, created on the fly. */
   accountsCreated: string[];

@@ -1197,6 +1197,41 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 17 — Import cutoff date
+
+Bank exports don't respect the date a budget started. A Simplii or Vancity file downloaded
+to pick up last month's activity routinely carries a year of history with it, and every one
+of those older rows imports as a real transaction that moves balances and Ready to Assign.
+Undoing it means finding the batch and deleting it — which only works if the mistake is
+noticed, and a stale row dated eight months back is not visible from the register's recent
+view.
+
+`budgets.import_cutoff_date` (migration `0009`, nullable `TEXT`) holds a `YYYY-MM-DD` date;
+rows dated before it are dropped at the route layer, after parsing and before any account is
+resolved or any row written. The cutoff date itself is *kept* — "don't import anything
+before this" — so setting it to the day budgeting started imports that day's rows.
+
+Three decisions worth recording:
+
+- **It lives on the budget, not on each import.** A field typed per import would not fix
+  anything: the failure being guarded against is *forgetting*, and a guard you must remember
+  to type is not a guard. Supplying one applies it to that import and remembers it for every
+  later one — the same "typed per import, remembered on the record" shape
+  `accounts.import_options` (PR 10) and `accounts.fx_rate_micros` (PR 15) already use.
+  Explicit `null` clears it, which is why the route tests `!== undefined` rather than
+  truthiness.
+- **It lives on the budget rather than the account** because "before I started budgeting" is
+  one date for the whole budget. Per-account would mean re-establishing it for every new
+  account — reintroducing exactly the forgetting it exists to prevent.
+- **Held-back rows are reported, not silently dropped.** They join `parseResult.skipped` with
+  a reason naming the cutoff, and the summary counts them separately as `beforeCutoff` so the
+  UI can present them as a guard working rather than as rows the parser choked on. Same
+  reasoning as the parsers' own skip reporting (see `src/import/wise.ts`).
+
+Transfer rows are filtered alongside ordinary ones. Both carry a date, and filtering only
+ordinary rows would let half a cross-currency pair through while its counterpart was held
+back.
+
 ### PR 16 — Transfer fees, and a same-currency rate leak
 
 Two fixes to transfer linking, one asked for and one found while looking at it.

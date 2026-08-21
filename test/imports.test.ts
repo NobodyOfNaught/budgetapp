@@ -45,6 +45,8 @@ interface ImportSummary {
   rowCount: number;
   imported: number;
   duplicates: number;
+  beforeCutoff: number;
+  cutoffDate: string | null;
   skipped: { reference: string; reason: string }[];
   accountsCreated: string[];
 }
@@ -879,5 +881,116 @@ describe('the review queue names what a transfer is linked to', () => {
     expect(row?.transferAccountName).toBeNull();
     expect(row?.transferAmountMinor).toBeNull();
     expect(row?.feeForAccountName).toBeNull();
+  });
+});
+
+describe('the import cutoff date', () => {
+  // A bank export doesn't respect the date a budget started: a file
+  // downloaded for last month routinely carries a year of history, and
+  // every older row would otherwise import as a real transaction moving
+  // balances and Ready to Assign. GIANT_FOOD is dated 2026-07-27,
+  // SPLIT_* 2026-08-03, TIM_HORTONS_CAD 2026-08-05.
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    return { app, sessionCookie, budgetId, accountId: account.account.id };
+  }
+
+  it('skips rows dated before the cutoff and says so', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-basic@example.com');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD), {
+      cutoffDate: '2026-08-01',
+    });
+
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(1);
+    expect(body.cutoffDate).toBe('2026-08-01');
+    // Reported, not silently dropped — a guard that quietly discards data
+    // is its own kind of bug.
+    expect(body.skipped).toContainEqual({
+      reference: 'Giant Food',
+      reason: 'dated 2026-07-27, before the 2026-08-01 cutoff',
+    });
+
+    const rows = await review(app, sessionCookie, budgetId);
+    expect(rows.map((r) => r.date)).toEqual(['2026-08-03']);
+  });
+
+  it('keeps a row dated exactly ON the cutoff', async () => {
+    // "prior to which it will not import" — the cutoff date itself is
+    // inside the window, so setting it to the day you started budgeting
+    // imports that day.
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-boundary@example.com');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD), {
+      cutoffDate: '2026-07-27',
+    });
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(0);
+  });
+
+  it('remembers the cutoff on the budget, so the next import is guarded without retyping it', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-remembered@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(SPLIT_USD), { cutoffDate: '2026-08-01' });
+
+    // Second import supplies NO cutoff at all — this is the whole point:
+    // the failure being guarded against is forgetting, so a guard you
+    // must remember to type is not a guard.
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD));
+    expect(body.imported).toBe(0);
+    expect(body.beforeCutoff).toBe(1);
+    expect(body.cutoffDate).toBe('2026-08-01');
+
+    const { body: budget } = await callJson<{ budget: { importCutoffDate: string | null } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}`,
+    );
+    expect(budget.budget.importCutoffDate).toBe('2026-08-01');
+  });
+
+  it('an explicit null clears the stored cutoff', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-clear@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(SPLIT_USD), { cutoffDate: '2026-08-01' });
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD), { cutoffDate: null });
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(0);
+    expect(body.cutoffDate).toBeNull();
+
+    const { body: budget } = await callJson<{ budget: { importCutoffDate: string | null } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}`,
+    );
+    expect(budget.budget.importCutoffDate).toBeNull();
+  });
+
+  it('imports everything when no cutoff has ever been set', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-absent@example.com');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD));
+    expect(body.imported).toBe(2);
+    expect(body.beforeCutoff).toBe(0);
+    expect(body.cutoffDate).toBeNull();
+  });
+
+  it('holds back a cross-currency transfer row too, not just ordinary ones', async () => {
+    // The two SPLIT_* legs are one purchase funded from a CAD balance,
+    // which the parser emits as a transfer plus an ordinary row. Both
+    // carry a date and both must respect the cutoff — filtering only
+    // ordinary rows would let a transfer through and strand its pair.
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-transfer@example.com');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(SPLIT_CAD, SPLIT_USD), {
+      cutoffDate: '2026-09-01',
+    });
+    expect(body.imported).toBe(0);
+    expect(body.beforeCutoff).toBe(2);
+  });
+
+  it('rejects a malformed cutoff rather than ignoring it', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-malformed@example.com');
+    const { status } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD), {
+      cutoffDate: 'last August',
+    });
+    expect(status).toBe(400);
   });
 });

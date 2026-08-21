@@ -38,7 +38,14 @@ budgetsRoute.get('/:budgetId', requireBudgetMember('viewer'), async (c) => {
   const budgetId = c.req.param('budgetId');
 
   const [budget] = await db
-    .select({ id: budgets.id, name: budgets.name, currencyCode: budgets.currencyCode })
+    .select({
+      id: budgets.id,
+      name: budgets.name,
+      currencyCode: budgets.currencyCode,
+      // Pre-fills the import form's cutoff field, so the guard the user
+      // set last time is visible rather than invisibly in force.
+      importCutoffDate: budgets.importCutoffDate,
+    })
     .from(budgets)
     .where(eq(budgets.id, budgetId))
     .limit(1);

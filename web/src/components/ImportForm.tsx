@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 import { IMPORT_PROVIDER_OPTIONS } from '../providers';
-import type { Account, ImportBatch, ImportSummary } from '../types';
+import type { Account, BudgetDetail, ImportBatch, ImportSummary } from '../types';
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
 function savedMembers(account: Account | undefined): string[] {
@@ -82,6 +82,13 @@ export function ImportForm({
   const [provider, setProvider] = useState('wise');
   const [file, setFile] = useState<File | null>(null);
   const [fxRate, setFxRate] = useState('');
+  // The budget-wide "don't import anything older than this" guard
+  // (budgets.import_cutoff_date — migrations/0009). Loaded from the budget
+  // so the guard already in force is visible rather than silently applied,
+  // and saved back when changed, so it holds for every later import
+  // without being retyped. '' means no cutoff.
+  const [cutoffDate, setCutoffDate] = useState('');
+  const [loadedCutoffDate, setLoadedCutoffDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
@@ -103,6 +110,14 @@ export function ImportForm({
   }
 
   useEffect(loadHistory, [budgetId]);
+
+  useEffect(() => {
+    apiFetch<{ budget: BudgetDetail }>(`/budgets/${budgetId}`).then((res) => {
+      const stored = res.budget.importCutoffDate ?? '';
+      setCutoffDate(stored);
+      setLoadedCutoffDate(stored);
+    });
+  }, [budgetId]);
 
   // Re-inspect whenever the file or provider changes — a wrong-provider
   // pick (or no file yet) just resets back to "nothing to choose".
@@ -202,6 +217,10 @@ export function ImportForm({
           csv,
           ...(needsMembers ? { options: { members: [...selectedMembers] } } : {}),
           ...(isForeignAccount && fxRate.trim() ? { fxRate: fxRate.trim() } : {}),
+          // Sent only when the user actually changed it, so an untouched
+          // form never rewrites the stored value. null clears it, which is
+          // why this is an explicit comparison and not a truthiness check.
+          ...(cutoffDate !== loadedCutoffDate ? { cutoffDate: cutoffDate || null } : {}),
         }),
       });
       setSummary(result);
@@ -274,12 +293,20 @@ export function ImportForm({
             held as a tracking account.
           </p>
         )}
+        {summary.beforeCutoff > 0 && (
+          <p>
+            <strong>{summary.beforeCutoff}</strong> held back as older than the {summary.cutoffDate} cutoff.
+          </p>
+        )}
         {summary.skipped.length > 0 && (
           <>
             <p style={{ marginBottom: '0.25rem' }}>Skipped {summary.skipped.length}:</p>
             <ul style={{ marginTop: 0 }}>
-              {summary.skipped.map((s) => (
-                <li key={s.reference} style={{ fontSize: '0.9em', color: '#666' }}>
+              {/* Index-keyed: references are the provider's own text and
+                  repeat freely (two cutoff-skipped rows can share a payee),
+                  so they are not unique enough to key on. */}
+              {summary.skipped.map((s, i) => (
+                <li key={`${s.reference}-${i}`} style={{ fontSize: '0.9em', color: '#666' }}>
                   {s.reference} — {s.reason}
                 </li>
               ))}
@@ -352,6 +379,22 @@ export function ImportForm({
             )}
           </div>
         )}
+        <div style={{ marginBlock: '0.5rem' }}>
+          <label>
+            Don&apos;t import anything before{' '}
+            <input type="date" value={cutoffDate} onChange={(e) => setCutoffDate(e.target.value)} />
+          </label>{' '}
+          {cutoffDate && (
+            <button type="button" onClick={() => setCutoffDate('')}>
+              Clear
+            </button>
+          )}
+          <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+            {cutoffDate
+              ? 'Rows dated earlier are skipped instead of imported. Saved for this budget, so it applies to every import until you change it.'
+              : 'Bank exports often carry more history than you want. Set a date — usually when you started budgeting — and older rows are skipped automatically.'}
+          </p>
+        </div>
         {needsMembers && participants && (
           <div style={{ marginBlock: '0.5rem' }}>
             <p style={{ marginBottom: '0.25rem' }}>Whose expenses belong to this budget?</p>

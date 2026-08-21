@@ -1,0 +1,26 @@
+-- Import cutoff date (PR 17) — one additive, nullable column, safe under
+-- the expand/contract rule (see the plan's "Guarding the shared production
+-- database"). Nothing on `main` today reads or writes it, and NULL — every
+-- row until someone sets one — means "no cutoff", which is exactly the
+-- behaviour that exists now.
+--
+-- Bank exports don't respect the date a budget started. A Simplii or
+-- Vancity file downloaded to pick up last month's activity routinely
+-- carries a year of history along with it, and every one of those older
+-- rows imports as a real transaction that moves balances and Ready to
+-- Assign. Undoing it means finding the batch and deleting it, which only
+-- works if the mistake is noticed at all — a stale row dated eight months
+-- back is not visible from the register's recent view.
+--
+-- A per-import field the user types each time would not fix this: the
+-- failure is forgetting, and something you must remember to type is not a
+-- guard. So the cutoff lives on the budget, is applied to every import
+-- automatically, and is remembered from the last one that set it — the
+-- same "typed per import, remembered on the record" pattern
+-- accounts.import_options (0006) and accounts.fx_rate_micros (0007)
+-- already follow.
+--
+-- Stored as 'YYYY-MM-DD' TEXT, matching transactions.date — a calendar
+-- date, not an instant, so it compares with plain string ordering exactly
+-- as every other date in this schema does.
+ALTER TABLE budgets ADD COLUMN import_cutoff_date TEXT;

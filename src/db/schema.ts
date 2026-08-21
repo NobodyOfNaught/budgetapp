@@ -88,6 +88,11 @@ export const budgets = sqliteTable('budgets', {
   // primitive shared budgets need later. Impossible to add after the fact
   // once rows are hard-deleted, so soft deletes (deletedAt) go everywhere.
   revision: integer('revision').notNull().default(0),
+  // 'YYYY-MM-DD', or NULL for no cutoff. Statement rows dated before this
+  // are skipped at import rather than written — see
+  // migrations/0009_budget_import_cutoff.sql for why this belongs to the
+  // budget rather than being typed per import.
+  importCutoffDate: text('import_cutoff_date'),
 });
 
 // Every authorization check reads this table, even though the MVP only ever

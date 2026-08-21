@@ -1197,56 +1197,63 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
-### PR 18 — Card payments made by linking, and what backs Ready to Assign
+### PR 18 — What backs Ready to Assign (and a card-payment fix that was wrong)
 
-Two changes from one investigation: a user's Ready to Assign read \$990.95 against \$521.37 of
-actual cash, which is not a state that should be reachable.
+Prompted by a budget showing Ready to Assign of \$990.95 against \$521.37 of cash. Two things
+came out of it: a display that explains the gap, and a change that looked right, was shipped,
+and had to be reverted — the second is the more useful note.
 
-**Linked card payments never drained the earmark.** `src/domain/ledger.ts` documents the only
-shape that works: the card-side leg is an uncategorized transfer (contributing nothing) and
-the OTHER leg is categorized to that card's payment category, which is what spends the money
-set aside. But `link-transfer` *refuses* a categorized leg (`is_categorized`), and both halves
-of an imported card payment arrive uncategorized — so a payment built by linking two imported
-rows could never have the leg the mechanic needs. Six real card payments totalling \$1,861.50
-had moved cash out of chequing without touching any category or Ready to Assign. Two rules
-that each made sense alone and did not compose.
+**What shipped.** `GET /months/:month` returns `cashOnHandMinor` and `creditDebtMinor`,
+balances as at the END of the month being viewed (computed from the rows the ledger already
+loads — fetched `date < nextMonth(month)`, the same window). The budget screen shows cash, card
+balances, un-budgeted card debt and current-month overspending under Ready to Assign, and says
+so explicitly when Ready to Assign exceeds the cash backing it.
 
-Linking now recognizes the shape and categorizes the paying leg itself. Direction is checked
-rather than assumed: money moving INTO a credit account pays debt down and is a payment; money
-moving out is a cash advance and gets nothing. Unlinking clears the category again, but only
-the auto-set shape — a payment category whose linked account is the *other* leg's account — so
-a category the user chose survives.
+**What was reverted, and why it matters.** `src/domain/ledger.ts` documents the shape that
+drains a card's earmark: the card-side leg an uncategorized transfer, the OTHER leg categorized
+to the card's payment category. `link-transfer` refuses a categorized leg, and both halves of an
+imported card payment arrive uncategorized, so a payment built by linking could never have that
+leg. That reads like a straightforward gap, and it was closed by having `link-transfer`
+categorize the paying leg itself.
 
-**The reconciliation is now on screen.** `GET /months/:month` returns `cashOnHandMinor` and
-`creditDebtMinor`, balances as at the END of the month being viewed (computed from the rows the
-ledger already loads, which are fetched `date < nextMonth(month)` — the same window). The
-budget screen shows cash, card balances, un-budgeted card debt and current-month overspending
-under Ready to Assign, and says so explicitly when Ready to Assign exceeds the cash backing it.
+It was wrong, and the reason is worth keeping. The payment category carries **two opposite sign
+conventions**:
 
-The identity worth recording, because the obvious version of it is wrong:
+- a *categorized* card purchase adds a POSITIVE earmark (money moved out of the spending
+  category and toward the card);
+- an *uncategorized* card row adds NEGATIVE raw debt (`ledger.ts` — "treated exactly as if it
+  had been categorized straight to Payment").
+
+A payment can drain the first but must not drain the second, and nothing about the payment says
+which kind of debt it is paying. Run against the real budget, with the invariant
+`sum(on-budget balances) = readyToAssign + sum(available)`:
+
+| | payment category once the card is paid | invariant |
+| --- | --- | --- |
+| uncategorized debt, leg uncategorized | −300.00 | holds |
+| uncategorized debt, leg categorized | **−600.00** | **off by 300** |
+| categorized purchase, leg categorized | 0.00 | holds |
+| categorized purchase, leg uncategorized | 50.00 | off by −50 |
+
+So the "fix" traded a real defect in the bottom row for an equal one in the second, and the
+budget it was built for is almost entirely uncategorized card rows — it made that budget worse.
+Reverted; the bottom row remains a known defect, reachable only when someone categorizes their
+card spending but leaves the payment's own leg uncategorized.
+
+**The invariant, stated correctly.** It holds against ALL on-budget accounts, cards included —
+not against cash:
 
 ```
-cashOnHand + creditDebt = readyToAssign
-                        + sum(available)
-                        + sum(categorized spending on card accounts)
-                        + sum(uncategorized transfer legs on card accounts)
+sum(on-budget balances) = readyToAssign + sum(available)
 ```
 
-Both card terms are real and both are load-bearing. The first is the credit-card doubling: a
-purchase drops the spending category and raises the payment category, leaving `sum(available)`
-unchanged while the card balance falls. The second is the card-side half of every payment —
-uncategorized by design, since the *other* leg is the one carrying the payment category.
+Cash alone diverges from `readyToAssign + sum(available)` by exactly the uncategorized
+credit-card debt, which is why a budget with a large pile of un-reviewed card rows shows a
+Ready to Assign that looks nothing like the money in the chequing account. Categorizing those
+rows is what closes it; no code change does.
 
-In a cash-only budget both terms are zero and the familiar
-`cash = readyToAssign + sum(available)` holds exactly. A card *purchase* alone doesn't break it
-either — the debt and the categorized spending cancel. What breaks it is **uncategorized** card
-debt: an imported card balance goes straight into the payment category as debt nobody has
-budgeted for, never passing through Ready to Assign, which therefore keeps reading as though
-that money were free. Each of those cases has a test.
-
-Verified against the real UAT budget rather than derived on paper: the four-term form closes to
-the cent (`469.58 = -1391.92 + 1861.50`), and an earlier two-term draft of this note was wrong
-precisely because it omitted the payment-leg term.
+A real fix for the sign-convention clash would mean the payment category picking ONE convention,
+which is a ledger-level change with migration consequences — noted, not attempted.
 
 ### PR 17 — Import cutoff date
 

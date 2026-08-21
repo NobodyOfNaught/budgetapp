@@ -519,6 +519,51 @@ describe('payee rules and the generic naming heuristic — provider-agnostic', (
   });
 });
 
+describe('Vancity: parser and the generic heuristic split the work', () => {
+  const VANCITY_HEADER = 'Date,Description,Debits,Credits,Balance';
+  function vancityCsv(...rows: string[]): string {
+    return [VANCITY_HEADER, ...rows, ''].join('\n');
+  }
+
+  it('collapses the triplicated name in the parser, then lets cleanPayeeName cut the reference number', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-vancity-payees@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Vancity',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.72',
+    });
+
+    const { status, body } = await callJson<ImportSummary>(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: account.account.id,
+        provider: 'vancity',
+        filename: 'vancity.csv',
+        csv: vancityCsv(
+          '14-Aug-2026,Payroll deposit INOVATEC INOVATEC INOVATEC,,2455.48,2803.59',
+          '14-Aug-2026,Bill payment-online WISE 6154 180470,2093.80,,709.79',
+          '25-Jul-2026,Bill payment-online VANCITY VISA 2476 376282,200.00,,1902.94',
+        ),
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.imported).toBe(3);
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const names = rows.map((r) => r.payeeName).sort();
+    // The stutter is gone (parser's job) AND the trailing per-payment
+    // reference number is gone (the route-layer heuristic's job) — neither
+    // alone produces these.
+    expect(names).toEqual(['INOVATEC', 'VANCITY VISA', 'WISE']);
+
+    // The untouched description survives for payee_rules to match on.
+    const payroll = rows.find((r) => r.payeeName === 'INOVATEC')!;
+    expect(payroll.importPayeeRaw).toBe('Payroll deposit INOVATEC INOVATEC INOVATEC');
+    expect(payroll.currencyCode).toBe('CAD');
+  });
+});
+
 describe('Splitwise: options plumbing', () => {
   const SPLITWISE_HEADER = 'Date,Description,Category,Cost,Currency,Steve,kristine sandt,Palle Helenius,Katherine Atwill';
   function splitwiseCsv(...rows: string[]): string {

@@ -974,6 +974,43 @@ UI to steer between them:
   behaviours are now asserted, so the difference can't silently regress.
 
 ---
+**Vancity import landed as the sixth provider** (`src/import/vancity.ts`), the user's first
+CAD chequing account, driven by a real 18-row export. Shares BECU's Debits/Credits split-
+column shape, so the sign rule (which column is populated decides it, never the printed
+character) and the content-derived `import_id` carried over unchanged. Three things are
+Vancity's own, all found by analyzing the real file before writing any parser code:
+
+- **The merchant name is printed THREE TIMES.** Not one bad row — every Preauthorized/
+  Payroll row does it: `Preauthorized credit Tangerine Tangerine Tangerine`,
+  `Payroll deposit INOVATEC INOVATEC INOVATEC`, `Preauthorized payment IND ALL LIFE IN IND
+  ALL LIFE IN IND ALL LIFE IN`. Left alone every payee reads as a stutter and no
+  `payee_rule` written against the sane name would ever match. Collapsed by detecting the
+  longest **repeated tail** rather than hardcoding "3" — the repeat count is the bank's
+  business, and a doubled name collapses identically (pinned by a test). The scan runs
+  left to right deliberately: right-to-left would find sub-repeats inside a longer unit and
+  mangle the name.
+- **`DD-Mon-YYYY` dates** (`18-Aug-2026`) — neither the US credit unions' `M/D/YYYY` nor
+  the ISO Wise/Neo emit. New `toIsoDateFromDayMonthName` in `src/import/dates.ts`, which
+  returns null for a well-shaped string carrying an unreal month rather than guessing.
+- **The type prefix is unseparated free text** (`Bill payment-online WISE 6154 180470`),
+  where BECU had a ` - ` to split on. Where a repeated tail exists the prefix falls out for
+  free — whatever precedes the repetition IS the prefix, no list needed — so only the
+  non-repeating rows need a vocabulary regex, and an unknown prefix degrades gracefully
+  into the route-layer heuristic.
+
+The parser deliberately stops short of stripping the trailing per-payment reference number
+(`WISE 6154 180470`): `cleanPayeeName` already cuts at the first standalone 2+-digit token
+followed by more tokens, which is exactly right for both shapes in this file. Verified
+end-to-end rather than assumed — a route-level test asserts the pipeline yields `WISE`,
+`VANCITY VISA`, and `INOVATEC`, which neither the parser nor the heuristic produces alone.
+That division is the PR 9 contract working as intended.
+
+**Ground truth was the file's own running `Balance` column**, reconciled row by row before
+any parser code existed — the same discipline AACU's import used, and what actually proves
+the Debits/Credits sign convention is the right way round. Opening 2519.74 → closing 55.63,
+net −2464.11, matching the parser's summed output to the cent.
+
+
 
 ## Roadmap
 
@@ -990,7 +1027,7 @@ Delta sync endpoint (`GET /budgets/:id/changes?since=N`) so two people on the sa
 see each other's edits.
 
 **Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, PR 13, and PR 15* —
-per-provider CSV parsers (Wise, then BECU, then Splitwise, then AACU, then Neo Mastercard),
+per-provider CSV parsers (Wise, BECU, Splitwise, AACU, Neo Mastercard, Vancity),
 an approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
 heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
 as a net-position clearing account with per-import member selection (see PR 10's notes

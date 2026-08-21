@@ -1197,6 +1197,59 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 16 — Transfer fees, and a same-currency rate leak
+
+Two fixes to transfer linking, one asked for and one found while looking at it.
+
+**The fee.** PR 14 required same-currency legs to be exact opposites, reasoning that within
+one currency an exact counterpart always exists. A real pair disproves it: a Vancity bill
+payment of `1900.31 CAD` on 2026-07-25 arrives in a Wise CAD balance as `1900.00 CAD` on
+2026-07-28, Wise keeping `0.31`. Both legs CAD, so the pair could not be linked at all — the
+only ways out were leaving a genuine transfer as two unrelated uncategorized rows (which moves
+Ready to Assign twice, once per leg, at each account's own rate) or hand-editing an amount the
+bank never printed.
+
+Linking now accepts a same-currency pair where **less arrived than left**, and books the
+difference as its own transaction:
+
+- The outflow leg shrinks to what actually arrived, making the two legs an exact pair and
+  preserving PR 14's Ready-to-Assign neutrality.
+- The difference becomes an ordinary row in the paying account, uncategorized by default (so
+  it lands in Ready to Assign, the honest default for money that left without being told
+  where from), memo `Fee on transfer to <account>`. `POST /link-transfer` accepts an optional
+  `feeCategoryId` to categorize it outright.
+- The account balance is unchanged: `-1900.00 + -0.31` is still `-1900.31`. What changes is
+  that the fee is now visible, categorizable spending instead of 31 cents quietly vanishing
+  from the budget while net worth silently dropped.
+
+Two rules keep the band from matching unrelated rows. **Direction**: a fee only ever makes
+less arrive than left, so `|outflow| >= |inflow|` is required — this is what stops it being a
+symmetric fuzzy match. **Size**: the allowance is `max(5.00, 2% of the outflow)`, because
+fees are near-flat on small transfers and proportional on large ones; one rule stretched over
+both would either reject a real 1.00 fee on a 20.00 transfer or admit nonsense. The candidate
+carries the exact `feeMinor` so the UI states it before the user commits.
+
+`transactions.fee_for_transaction_id` (migration `0008`) points the fee row back at the leg it
+came from, which is what makes the whole thing reversible: unlinking folds the fee back and
+removes the row, and deleting the leg takes the fee with it. Without it, undoing a mistaken
+link would leave the leg permanently short and a stray fee row beside it.
+
+**The leak.** PR 14 normalized `budget_amount_minor` across a linked pair only in the
+cross-currency branch, on the assumption that same currency implies the same conversion. PR 15
+made that false: two accounts in the *same* currency can hold *different* rates, and this
+budget really does have Wise CAD at `0.72` while every other CAD account sits at `0.73`.
+Linking two CAD rows therefore produced legs of `-138700` and `+136800` — not equal and
+opposite — leaking the rate difference straight into Ready to Assign. The normalization now
+runs for every link, not just cross-currency ones: the budget-currency leg wins when there is
+one, otherwise the outflow is converted at its own account's rate and mirrored.
+
+The underlying data issue is worth stating separately, because code cannot fix it: two
+accounts in one currency holding different rates makes moving money between them change
+reported net worth, since `netWorthTrend` values each account's balance at its own rate. That
+is inherent to per-account rates and is an argument for the `exchange_rates` table Phase 5
+already contemplates — a per-currency rate rather than a per-account one.
+
+
 
 ## Roadmap
 
@@ -1228,7 +1281,8 @@ would need cross-account amount/date matching.~~ **Landed in PR 14** — suggest
 plus manual linking of two already-imported rows (see below). Still to come there: doing it
 automatically at import time rather than on request. ~~The cross-currency case (PR 14
 requires both legs in the same currency).~~ **Landed** — see the cross-currency linking
-notes above.
+notes above. ~~The same-currency case where a fee is skimmed in transit, so no exact
+counterpart exists.~~ **Landed in PR 16** — see the transfer-fee notes below.
 
 **Phase 5 — Full multi-currency.** *Partially landed in PR 15* — a foreign-currency account
 can now be genuinely on-budget, given a per-import exchange rate remembered on the account

@@ -438,7 +438,64 @@ const TRANSFER_MATCH_WINDOW_DAYS = 5;
  */
 const CROSS_CURRENCY_TOLERANCE = 0.1;
 
-const linkTransferSchema = z.object({ otherTransactionId: z.string().min(1) });
+/**
+ * How much LESS may arrive than left, on a SAME-currency pair, and still
+ * be offered as a transfer — the wire/conversion fee taken in transit.
+ *
+ * PR 14 required same-currency legs to be exact opposites, on the sound
+ * reasoning that an exact counterpart always exists within one currency.
+ * That turns out to be false whenever a fee is skimmed en route: a real
+ * Vancity bill payment of 1900.31 CAD arrived in a Wise CAD balance as
+ * 1900.00 CAD, both legs CAD, 0.31 kept by Wise. Under the exact rule the
+ * pair simply could not be linked, and the only ways out were leaving a
+ * genuine transfer looking like two unrelated uncategorized rows (which
+ * moves Ready to Assign twice) or hand-editing the statement amount to a
+ * figure the bank never printed.
+ *
+ * Two things keep the band from matching unrelated rows:
+ *
+ * 1. DIRECTION. A fee only ever makes LESS arrive than left, never more,
+ *    so |outflow| >= |inflow| is required. This is what stops the band
+ *    being a symmetric fuzzy-match; a pair that misses in the other
+ *    direction is not a fee and is not offered.
+ * 2. SIZE. Fees are near-flat on small transfers and proportional on
+ *    large ones, so the allowance is the larger of the two rather than
+ *    one rule stretched to cover both: 5.00 of the account's currency, or
+ *    2% of the outflow. On the 1900.31 pair that is 38.00 against an
+ *    actual gap of 0.31; on a 20.00 transfer it is 5.00, which admits a
+ *    real 1.00 fee while still refusing a 20.00-against-5.00 pair.
+ *
+ * The link is never silent either way: the candidate carries the exact
+ * `feeMinor` so the UI states it before the user commits, the fee becomes
+ * its own visible row, and unlinking folds it back.
+ */
+const SAME_CURRENCY_FEE_FLAT_MINOR = 500;
+const SAME_CURRENCY_FEE_FRACTION = 0.02;
+
+/**
+ * The fee implied by a same-currency pair — how much of the outflow never
+ * arrived — or null when the two don't describe one movement at all.
+ * 0 is a legitimate answer (the exact pair PR 14 already handled).
+ */
+function sameCurrencyFeeMinor(aMinor: number, bMinor: number): number | null {
+  if (aMinor === 0 || bMinor === 0) return null;
+  if (Math.sign(aMinor) === Math.sign(bMinor)) return null;
+
+  const outflow = Math.abs(Math.min(aMinor, bMinor));
+  const inflow = Math.abs(Math.max(aMinor, bMinor));
+  // More arrived than left: not a fee, and not something to guess about.
+  if (inflow > outflow) return null;
+
+  const allowance = Math.max(SAME_CURRENCY_FEE_FLAT_MINOR, Math.round(outflow * SAME_CURRENCY_FEE_FRACTION));
+  const fee = outflow - inflow;
+  return fee <= allowance ? fee : null;
+}
+
+const linkTransferSchema = z.object({
+  otherTransactionId: z.string().min(1),
+  /** Optional category for the carved-out fee row; uncategorized (so it lands in Ready to Assign) when omitted. */
+  feeCategoryId: z.string().min(1).nullable().optional(),
+});
 
 /** The columns both the candidate search and the link validation need. */
 const linkableColumns = {
@@ -482,10 +539,13 @@ async function transferLinkBlocker(
   return null;
 }
 
-// Candidate matches for one transaction: the opposite amount, in a
+// Candidate matches for one transaction: the offsetting amount, in a
 // different account, dated within TRANSFER_MATCH_WINDOW_DAYS, and itself
-// linkable. Exact-amount only — a near-miss match on money is a guess, and
-// this feature exists to remove ambiguity, not add it.
+// linkable. Same-currency matching is exact OR short by a fee taken in
+// transit (SAME_CURRENCY_FEE_FLAT_MINOR); cross-currency matching is a
+// tolerance band (CROSS_CURRENCY_TOLERANCE). Both near-miss forms are
+// reported to the caller — `feeMinor` and `approximate` — so the user
+// confirms a match rather than having one quietly assumed.
 transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
   const budgetId = budgetIdParam(c);
   const transactionId = c.req.param('transactionId');
@@ -533,8 +593,14 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
   for (const candidate of rows) {
     const sameCurrency = candidate.currencyCode === row.currencyCode;
 
-    // Same currency keeps PR 14's exact-opposite rule untouched.
-    if (sameCurrency && candidate.amountMinor !== -row.amountMinor) continue;
+    // Same currency: an exact opposite, or an outflow that lost a fee on
+    // the way (see sameCurrencyFeeMinor). null means neither.
+    let feeMinor = 0;
+    if (sameCurrency) {
+      const fee = sameCurrencyFeeMinor(row.amountMinor, candidate.amountMinor);
+      if (fee === null) continue;
+      feeMinor = fee;
+    }
 
     // Across currencies the legs are different numbers by definition, so
     // compare what they're each WORTH in the budget's currency, and only
@@ -559,6 +625,13 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
       importPayeeRaw: candidate.importPayeeRaw,
       /** True when the two legs are in different currencies, so the match is a near-miss by nature rather than an exact offset. */
       approximate: !sameCurrency,
+      /**
+       * For a same-currency pair, how much of the outflow never arrived —
+       * booked as its own transaction if this candidate is chosen. Always
+       * 0 across currencies, where the gap is a rate difference rather
+       * than a fee and there is no honest way to tell the two apart.
+       */
+      feeMinor,
     });
     if (candidates.length >= 20) break;
   }
@@ -571,7 +644,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
   const transactionId = c.req.param('transactionId');
   const parsed = linkTransferSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
-  const { otherTransactionId } = parsed.data;
+  const { otherTransactionId, feeCategoryId } = parsed.data;
   if (otherTransactionId === transactionId) return c.json({ error: 'cannot_link_to_self' }, 400);
 
   const db = getDb(c.env);
@@ -602,11 +675,15 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
 
   const sameCurrency = first.currencyCode === second.currencyCode;
 
-  // Same currency: exact opposites, unchanged from PR 14. Also rejects a
-  // 0/0 pair, which is not a transfer of anything and would link two
-  // unrelated rows on a technicality.
-  if (sameCurrency && (first.amountMinor !== -second.amountMinor || first.amountMinor === 0)) {
+  // Same currency: exact opposites, or an outflow short by a fee taken in
+  // transit. null covers the same cases PR 14's exact rule rejected — a
+  // 0 leg, two outflows, or a gap too large to be a fee.
+  const feeMinor = sameCurrency ? sameCurrencyFeeMinor(first.amountMinor, second.amountMinor) : 0;
+  if (feeMinor === null) {
     return c.json({ error: 'amounts_do_not_offset' }, 400);
+  }
+  if (feeCategoryId && !(await categoryExists(db, budgetId, feeCategoryId))) {
+    return c.json({ error: 'category_not_found' }, 400);
   }
 
   // Cross-currency: the two legs are DIFFERENT numbers by definition, so
@@ -617,51 +694,65 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
     return c.json({ error: 'amounts_do_not_offset' }, 400);
   }
 
+  // The fee never crossed — it was consumed in transit — so the transfer
+  // is worth what ARRIVED. Shrinking the outflow to the inflow makes the
+  // two legs an exact pair; the difference is booked separately below, so
+  // the account's balance is unchanged (-1900.00 plus -0.31 is still
+  // -1900.31) while the fee becomes real, categorizable spending rather
+  // than 31 cents quietly leaving the budget.
+  const firstIsOutflow = first.amountMinor < 0;
+  const outflowLeg = firstIsOutflow ? first : second;
+  const outflowAccount = firstIsOutflow ? firstAccount : secondAccount;
+  const outflowAmountMinor = feeMinor > 0 ? outflowLeg.amountMinor + feeMinor : outflowLeg.amountMinor;
+
   // What the movement was actually WORTH, in the budget's currency.
   //
   // Linking must stay Ready-to-Assign-neutral — PR 14's whole invariant —
   // and that only holds if the two legs' budgetAmountMinor are exactly
-  // equal and opposite. Across currencies they generally aren't: each was
-  // converted independently at its own account's NOMINAL rate, while the
-  // transfer settled at whatever the bank actually gave. So one side is
-  // chosen as the truth and the other is set to its negation.
+  // equal and opposite. Stored values generally aren't, and NOT only
+  // across currencies: each leg was converted independently at its own
+  // account's rate, and two accounts in the SAME currency can hold
+  // different rates (this budget really does have Wise CAD at 0.72 while
+  // every other CAD account sits at 0.73). PR 14 normalized the
+  // cross-currency case only, which left same-currency links leaking the
+  // rate difference straight into Ready to Assign — invisible until a
+  // foreign account could be on-budget at all, which is PR 15. So one
+  // side is chosen as the truth and the other set to its negation, for
+  // every link.
   //
   // The budget-currency leg wins when there is one, because it needs no
   // conversion at all — it IS the realized value, which beats any stored
   // rate. That is the same "derive the effective rate from the two legs"
   // principle the Wise importer already uses (see src/routes/imports.ts),
   // and it corrects the other leg from nominal to realized in the process.
-  let firstBudgetAmountMinor = first.budgetAmountMinor;
-  let secondBudgetAmountMinor = second.budgetAmountMinor;
-  if (!sameCurrency) {
-    const [budget] = await db
-      .select({ currencyCode: budgets.currencyCode })
-      .from(budgets)
-      .where(eq(budgets.id, budgetId))
-      .limit(1);
-    if (!budget) return c.json({ error: 'not_found' }, 404);
+  const [budget] = await db
+    .select({ currencyCode: budgets.currencyCode })
+    .from(budgets)
+    .where(eq(budgets.id, budgetId))
+    .limit(1);
+  if (!budget) return c.json({ error: 'not_found' }, 404);
 
-    if (first.currencyCode === budget.currencyCode) {
-      secondBudgetAmountMinor = -firstBudgetAmountMinor;
-    } else if (second.currencyCode === budget.currencyCode) {
-      firstBudgetAmountMinor = -secondBudgetAmountMinor;
-    } else {
-      // Neither leg is in the budget's currency (CAD -> EUR in a USD
-      // budget), so nothing here is a realized budget-currency figure.
-      // Fall back to converting the OUTFLOW leg at its account's rate and
-      // mirroring it — still exactly equal and opposite, still
-      // RTA-neutral, just resting on a nominal rate rather than a
-      // realized one. Without a rate there is nothing honest to use.
-      const firstIsOutflow = first.amountMinor < 0;
-      const outflowAccount = firstIsOutflow ? firstAccount : secondAccount;
-      const outflow = firstIsOutflow ? first : second;
-      if (outflowAccount.fxRateMicros === null) {
-        return c.json({ error: 'needs_fx_rate_to_link' }, 400);
-      }
-      const outflowValue = convertToBudgetMinor(outflow.amountMinor, outflowAccount.fxRateMicros);
-      firstBudgetAmountMinor = firstIsOutflow ? outflowValue : -outflowValue;
-      secondBudgetAmountMinor = -firstBudgetAmountMinor;
+  let firstBudgetAmountMinor: number;
+  let secondBudgetAmountMinor: number;
+  if (first.currencyCode === budget.currencyCode) {
+    firstBudgetAmountMinor = firstIsOutflow ? outflowAmountMinor : first.amountMinor;
+    secondBudgetAmountMinor = -firstBudgetAmountMinor;
+  } else if (second.currencyCode === budget.currencyCode) {
+    secondBudgetAmountMinor = firstIsOutflow ? second.amountMinor : outflowAmountMinor;
+    firstBudgetAmountMinor = -secondBudgetAmountMinor;
+  } else {
+    // Neither leg is in the budget's currency (CAD -> CAD, or CAD -> EUR,
+    // in a USD budget), so nothing here is a realized budget-currency
+    // figure. Convert the OUTFLOW leg at its account's rate and mirror it
+    // — still exactly equal and opposite, still RTA-neutral, just resting
+    // on a nominal rate rather than a realized one. Without a rate there
+    // is nothing honest to use.
+    if (outflowAccount.fxRateMicros === null) {
+      return c.json({ error: 'needs_fx_rate_to_link' }, 400);
     }
+    const outflowValue = convertToBudgetMinor(outflowAmountMinor, outflowAccount.fxRateMicros);
+    firstBudgetAmountMinor = firstIsOutflow ? outflowValue : -outflowValue;
+    secondBudgetAmountMinor = -firstBudgetAmountMinor;
   }
 
   const now = Date.now();
@@ -677,6 +768,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
       transferTransactionId: second.id,
       transferAccountId: second.accountId,
       payeeId: firstPayeeId,
+      amountMinor: firstIsOutflow ? outflowAmountMinor : first.amountMinor,
       budgetAmountMinor: firstBudgetAmountMinor,
       updatedAt: now,
     })
@@ -687,12 +779,38 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
       transferTransactionId: first.id,
       transferAccountId: first.accountId,
       payeeId: secondPayeeId,
+      amountMinor: firstIsOutflow ? second.amountMinor : outflowAmountMinor,
       budgetAmountMinor: secondBudgetAmountMinor,
       updatedAt: now,
     })
     .where(eq(transactions.id, second.id));
 
-  return c.json({ status: 'ok' });
+  // The fee, as its own row in the account that paid it. Uncategorized
+  // unless the caller named a category — an uncategorized outflow moves
+  // Ready to Assign, which is the honest default for money that left the
+  // budget and hasn't been told where from. feeForTransactionId is what
+  // lets unlink fold this back in (see below).
+  let feeTransactionId: string | null = null;
+  if (feeMinor > 0) {
+    feeTransactionId = await insertTransaction(
+      db,
+      {
+        budgetId,
+        accountId: outflowLeg.accountId,
+        date: outflowLeg.date,
+        amountMinor: -feeMinor,
+        currencyCode: outflowLeg.currencyCode,
+        categoryId: feeCategoryId ?? null,
+        budgetAmountMinor: budgetAmountFor(outflowAccount, -feeMinor),
+        memo: `Fee on transfer to ${(firstIsOutflow ? secondAccount : firstAccount).name}`,
+        cleared: 'cleared',
+        feeForTransactionId: outflowLeg.id,
+      },
+      now,
+    );
+  }
+
+  return c.json({ status: 'ok', feeMinor, feeTransactionId });
 });
 
 // Undoes a link, leaving both rows exactly as ordinary transactions again
@@ -723,8 +841,64 @@ transactionsRoute.post('/:transactionId/unlink-transfer', requireBudgetMember('e
     .set(clearLink)
     .where(and(eq(transactions.id, row.transferTransactionId), eq(transactions.budgetId, budgetId)));
 
-  return c.json({ status: 'ok' });
+  // Fold any carved-out fee back into the leg it came from, so unlinking
+  // restores the amount the statement actually printed rather than
+  // leaving the leg permanently short and a stray fee row beside it. Both
+  // legs are checked because either one may be the outflow that paid it.
+  const restored = await restoreTransferFees(db, [row.id, row.transferTransactionId], now);
+
+  return c.json({ status: 'ok', feeRestoredMinor: restored });
 });
+
+/**
+ * Removes fee rows carved out of these transfer legs, adding each back
+ * onto the leg it was taken from. Returns the total folded back.
+ *
+ * The fee's budgetAmountMinor is deliberately NOT added back to the leg's:
+ * link-transfer sets both legs' budget values to an exactly-offsetting
+ * pair, and after unlinking the leg is an ordinary row again whose budget
+ * value should reflect its own restored amount at its own account's rate.
+ * Recomputing beats arithmetic on two independently-rounded figures.
+ */
+async function restoreTransferFees(db: Db, legIds: string[], now: number): Promise<number> {
+  const fees = await db
+    .select({
+      id: transactions.id,
+      amountMinor: transactions.amountMinor,
+      feeForTransactionId: transactions.feeForTransactionId,
+    })
+    .from(transactions)
+    .where(and(inArray(transactions.feeForTransactionId, legIds), isNull(transactions.deletedAt)));
+
+  let total = 0;
+  for (const fee of fees) {
+    const [leg] = await db
+      .select({ id: transactions.id, amountMinor: transactions.amountMinor, accountId: transactions.accountId })
+      .from(transactions)
+      .where(and(eq(transactions.id, fee.feeForTransactionId!), isNull(transactions.deletedAt)))
+      .limit(1);
+    if (!leg) continue;
+
+    const [account] = await db
+      .select({ fxRateMicros: accounts.fxRateMicros })
+      .from(accounts)
+      .where(eq(accounts.id, leg.accountId))
+      .limit(1);
+
+    const restoredAmount = leg.amountMinor + fee.amountMinor;
+    await db
+      .update(transactions)
+      .set({
+        amountMinor: restoredAmount,
+        budgetAmountMinor: (account && budgetAmountFor(account, restoredAmount)) ?? restoredAmount,
+        updatedAt: now,
+      })
+      .where(eq(transactions.id, leg.id));
+    await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, fee.id));
+    total += Math.abs(fee.amountMinor);
+  }
+  return total;
+}
 
 // ---------------------------------------------------------------------------
 // Register list — mounted at /budgets/:budgetId/accounts/:accountId/transactions

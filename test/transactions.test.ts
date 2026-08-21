@@ -912,9 +912,19 @@ describe('linking a transfer across currencies', () => {
     expect(body.error).toBe('amounts_do_not_offset');
   });
 
-  it('still requires an exact offset when both legs share a currency', async () => {
-    // The relaxation is strictly for the cross-currency case; same-currency
-    // matching keeps PR 14's exact rule.
+  it('refuses a same-currency pair whose gap is too large to be a fee', async () => {
+    // This case originally asserted that same-currency matching required
+    // an EXACT offset, on the reasoning that within one currency an exact
+    // counterpart always exists. A real Vancity -> Wise CAD transfer
+    // disproved it: 1900.31 CAD left, 1900.00 CAD arrived, both legs CAD,
+    // 0.31 kept as a fee — a genuine transfer the exact rule could not
+    // express at all. So a fee-shaped gap is now accepted and booked as
+    // its own row (see the fee suite below), and what stays refused is a
+    // gap too large to be a fee.
+    //
+    // The amounts here changed with the expectation for that reason: the
+    // original -100.00 against +99.00 is a 1.00 gap, which IS fee-shaped
+    // and now links. -100.00 against +50.00 is not.
     const { app, sessionCookie, budgetId, usd } = await crossCurrencySetup('xfx-same-currency-strict@example.com');
     const other = await createAccount(app, sessionCookie, budgetId, { name: 'BECU', type: 'checking' });
     const { body: a } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
@@ -923,7 +933,7 @@ describe('linking a transfer across currencies', () => {
     });
     const { body: b } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
       method: 'POST',
-      body: JSON.stringify({ kind: 'ordinary', accountId: other, date: '2026-08-20', amount: '99.00' }),
+      body: JSON.stringify({ kind: 'ordinary', accountId: other, date: '2026-08-20', amount: '50.00' }),
     });
 
     const { status, body } = await callJson<{ error: string }>(
@@ -979,5 +989,330 @@ describe('authorization', () => {
       body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-01-01', amount: '-1.00' }),
     });
     expect(status).toBe(403);
+  });
+});
+
+describe('linking a same-currency transfer that lost a fee in transit', () => {
+  // The real pair this was built for, transcribed from the live budget: a
+  // Vancity bill payment of 1900.31 CAD landing in a Wise CAD balance as
+  // 1900.00 CAD three days later, Wise keeping 0.31. Both legs CAD, so
+  // PR 14's exact-opposite rule refused the link outright.
+  //
+  // The two CAD accounts deliberately carry DIFFERENT rates (0.73 and
+  // 0.72), which is not a contrivance — it is exactly what the live
+  // budget holds, and it is what exposed the second bug fixed here (see
+  // the Ready to Assign case below).
+  async function feeSetup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const vancity = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Vancity Gold',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    const wise = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Wise CAD',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.72',
+    });
+
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: vancity, date: '2026-07-25', amount: '-1900.31' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise, date: '2026-07-28', amount: '1900.00' }),
+    });
+    return { app, sessionCookie, budgetId, vancity, wise, outId: out.transactionId, inId: inn.transactionId };
+  }
+
+  async function rowsIn(accountId: string) {
+    const res = await env.DB.prepare(
+      'select id, amount_minor as amountMinor, budget_amount_minor as budgetAmountMinor, category_id as categoryId,' +
+        ' memo, fee_for_transaction_id as feeFor from transactions where account_id = ? and deleted_at is null order by amount_minor',
+    )
+      .bind(accountId)
+      .all<{
+        id: string;
+        amountMinor: number;
+        budgetAmountMinor: number;
+        categoryId: string | null;
+        memo: string | null;
+        feeFor: string | null;
+      }>();
+    return res.results;
+  }
+
+  it('offers the short inflow as a candidate, naming the exact fee', async () => {
+    const { app, sessionCookie, budgetId, outId } = await feeSetup('fee-candidate@example.com');
+    const { body } = await callJson<{ candidates: { amountMinor: number; feeMinor: number; approximate: boolean }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/transfer-candidates`,
+    );
+    expect(body.candidates).toHaveLength(1);
+    // Not `approximate` — that flag means "different currencies, so the
+    // amounts can't match". These are both CAD and the gap is a known,
+    // exact fee, which is a different thing and reported as its own field.
+    expect(body.candidates[0]).toMatchObject({ amountMinor: 190000, feeMinor: 31, approximate: false });
+  });
+
+  it('still offers an exactly-matching pair, with no fee', async () => {
+    const { app, sessionCookie, budgetId, wise } = await feeSetup('fee-exact@example.com');
+    const { body: exact } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise, date: '2026-07-25', amount: '-500.00' }),
+    });
+    const { body } = await callJson<{ candidates: { id: string; feeMinor: number }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${exact.transactionId}/transfer-candidates`,
+    );
+    expect(body.candidates).toEqual([]);
+  });
+
+  it('refuses a pair where MORE arrived than left — that is not a fee', async () => {
+    const { app, sessionCookie, budgetId, wise, outId } = await feeSetup('fee-backwards@example.com');
+    // 1900.50 in against 1900.31 out. A fee only ever subtracts, so this
+    // direction is not offered no matter how small the gap.
+    const { body: tooBig } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise, date: '2026-07-26', amount: '1900.50' }),
+    });
+    const { body } = await callJson<{ candidates: { id: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/transfer-candidates`,
+    );
+    expect(body.candidates.map((c) => c.id)).not.toContain(tooBig.transactionId);
+
+    const { status, body: err } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: tooBig.transactionId }) },
+    );
+    expect(status).toBe(400);
+    expect(err.error).toBe('amounts_do_not_offset');
+  });
+
+  it('refuses a gap too large to be a fee', async () => {
+    const { app, sessionCookie, budgetId, wise, outId } = await feeSetup('fee-too-large@example.com');
+    // 1800.00 against 1900.31 is a 100.31 gap — past both the flat 5.00
+    // allowance and 2% of the outflow (38.01).
+    const { body: way } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise, date: '2026-07-26', amount: '1800.00' }),
+    });
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: way.transactionId }),
+    });
+    expect(status).toBe(400);
+  });
+
+  it('admits a flat fee on a small transfer that 2% alone would reject', async () => {
+    const { app, sessionCookie, budgetId, vancity, wise } = await feeSetup('fee-small-transfer@example.com');
+    // 20.00 out, 19.00 in. 1.00 is 5% of the outflow — outside the
+    // proportional band, inside the flat 5.00 one. Real fees behave this
+    // way: near-flat on small amounts, proportional on large ones.
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: vancity, date: '2026-05-02', amount: '-20.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise, date: '2026-05-02', amount: '19.00' }),
+    });
+    const { body } = await callJson<{ candidates: { feeMinor: number }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/transfer-candidates`,
+    );
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]?.feeMinor).toBe(100);
+  });
+
+  it('links the pair, shrinking the outflow and booking the fee as its own row', async () => {
+    const { app, sessionCookie, budgetId, vancity, wise, outId, inId } = await feeSetup('fee-link@example.com');
+
+    const { status, body } = await callJson<{ feeMinor: number; feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId }) },
+    );
+    expect(status).toBe(200);
+    expect(body.feeMinor).toBe(31);
+
+    const vancityRows = await rowsIn(vancity);
+    expect(vancityRows).toHaveLength(2);
+
+    const leg = vancityRows.find((r) => r.id === outId)!;
+    const fee = vancityRows.find((r) => r.id === body.feeTransactionId)!;
+    expect(leg.amountMinor).toBe(-190000);
+    expect(fee.amountMinor).toBe(-31);
+    expect(fee.feeFor).toBe(outId);
+    expect(fee.memo).toBe('Fee on transfer to Wise CAD');
+    // Uncategorized by default — the user picks where it belongs.
+    expect(fee.categoryId).toBeNull();
+
+    // THE point of the whole exercise: the account still holds exactly
+    // what the bank said it does. -1900.00 + -0.31 = -1900.31.
+    expect(leg.amountMinor + fee.amountMinor).toBe(-190031);
+
+    const wiseRows = await rowsIn(wise);
+    expect(wiseRows).toHaveLength(1);
+    expect(wiseRows[0]?.amountMinor).toBe(190000);
+  });
+
+  it('categorizes the fee when asked', async () => {
+    const { app, sessionCookie, budgetId, vancity, outId, inId } = await feeSetup('fee-categorized@example.com');
+    const categoryId = await firstCategoryId(app, sessionCookie, budgetId);
+
+    const { body } = await callJson<{ feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId, feeCategoryId: categoryId }) },
+    );
+    const fee = (await rowsIn(vancity)).find((r) => r.id === body.feeTransactionId)!;
+    expect(fee.categoryId).toBe(categoryId);
+    // Converted at the PAYING account's rate, like any other spending on it.
+    expect(fee.budgetAmountMinor).toBe(-23); // -31 CAD at 0.73
+  });
+
+  it('rejects a fee category that is not in this budget', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-bad-category@example.com');
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId, feeCategoryId: 'nope' }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('category_not_found');
+  });
+
+  it('leaves the two legs exactly offsetting in budget currency, despite the accounts holding different rates', async () => {
+    // The second bug this change fixes. Before it, the same-currency link
+    // path never touched budgetAmountMinor at all — it only normalized
+    // the cross-currency case. Two CAD accounts at 0.73 and 0.72 would
+    // therefore end up linked with legs of -1387.00 and +1368.00, which
+    // do NOT offset, quietly leaking the rate difference into Ready to
+    // Assign. Same currency was assumed to imply the same rate; PR 15
+    // made that false.
+    const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-budget-offset@example.com');
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+
+    const res = await env.DB.prepare(
+      'select id, budget_amount_minor as budgetAmountMinor from transactions where id in (?, ?)',
+    )
+      .bind(outId, inId)
+      .all<{ id: string; budgetAmountMinor: number }>();
+    const out = res.results.find((r) => r.id === outId)!;
+    const inn = res.results.find((r) => r.id === inId)!;
+
+    // Neither leg is in the budget's currency (both CAD, budget USD), so
+    // the outflow's own account rate decides: -190000 at 0.73 = -138700.
+    expect(out.budgetAmountMinor).toBe(-138700);
+    expect(inn.budgetAmountMinor).toBe(138700);
+    expect(out.budgetAmountMinor + inn.budgetAmountMinor).toBe(0);
+  });
+
+  it('moves Ready to Assign by the fee alone — the transfer itself stays neutral', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-rta@example.com');
+
+    async function readyToAssign() {
+      const { body } = await callJson<{ readyToAssign: number }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-07`);
+      return body.readyToAssign;
+    }
+
+    // Unlinked, the two rows are uncategorized inflow/outflow on
+    // on-budget accounts, so both hit Ready to Assign at their own
+    // account's nominal rate: -138723 + 136800.
+    expect(await readyToAssign()).toBe(-1923);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+
+    // Afterwards the transfer contributes nothing at all, and the only
+    // remaining Ready to Assign movement is the fee row: -31 CAD at the
+    // paying account's 0.73. The 1923 that was sitting in RTA purely
+    // because two CAD accounts disagreed about the rate is gone.
+    expect(await readyToAssign()).toBe(-23);
+  });
+
+  it('unlinking folds the fee back into the leg and removes the fee row', async () => {
+    const { app, sessionCookie, budgetId, vancity, outId, inId } = await feeSetup('fee-unlink@example.com');
+
+    const { body: linked } = await callJson<{ feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId }) },
+    );
+
+    const { body: unlinked } = await callJson<{ feeRestoredMinor: number }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/unlink-transfer`,
+      { method: 'POST' },
+    );
+    expect(unlinked.feeRestoredMinor).toBe(31);
+
+    const rows = await rowsIn(vancity);
+    // Back to exactly the one row the statement printed.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(outId);
+    expect(rows[0]?.amountMinor).toBe(-190031);
+    // Recomputed at the account's own rate, not arithmetic on two
+    // separately-rounded budget figures.
+    expect(rows[0]?.budgetAmountMinor).toBe(-138723);
+
+    const gone = await env.DB.prepare('select deleted_at as deletedAt from transactions where id = ?')
+      .bind(linked.feeTransactionId)
+      .first<{ deletedAt: number | null }>();
+    expect(gone?.deletedAt).not.toBeNull();
+  });
+
+  it('unlinking from the INFLOW side restores the fee too', async () => {
+    // The fee hangs off the outflow leg, but unlink can be called on
+    // either half, so both are checked for fees.
+    const { app, sessionCookie, budgetId, vancity, outId, inId } = await feeSetup('fee-unlink-other-side@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${inId}/unlink-transfer`, { method: 'POST' });
+
+    const rows = await rowsIn(vancity);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.amountMinor).toBe(-190031);
+  });
+
+  it('deleting the transfer takes the fee row with it', async () => {
+    const { app, sessionCookie, budgetId, vancity, wise, outId, inId } = await feeSetup('fee-delete@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}`, { method: 'DELETE' });
+
+    // Both legs go (transfer cascade) and so does the fee — leaving a
+    // lone -0.31 "fee on transfer" beside a transfer that no longer
+    // exists would be worse than either outcome.
+    expect(await rowsIn(vancity)).toEqual([]);
+    expect(await rowsIn(wise)).toEqual([]);
   });
 });

@@ -21,6 +21,8 @@ export interface NewTransactionInput {
   transferTransactionId?: string | null;
   transferAccountId?: string | null;
   parentTransactionId?: string | null;
+  /** Set only on a fee row carved out of a transfer leg — see migrations/0008_transfer_fee_link.sql. */
+  feeForTransactionId?: string | null;
   /** Value in the BUDGET's currency. Defaults to amountMinor (same-currency case). */
   budgetAmountMinor?: number;
   /** Statement-import provenance — see src/import/ and the partial unique index on (account_id, import_id). */
@@ -57,6 +59,7 @@ export async function insertTransaction(db: Db, input: NewTransactionInput, now:
     transferTransactionId: input.transferTransactionId ?? null,
     transferAccountId: input.transferAccountId ?? null,
     parentTransactionId: input.parentTransactionId ?? null,
+    feeForTransactionId: input.feeForTransactionId ?? null,
     importId: input.importId ?? null,
     importBatchId: input.importBatchId ?? null,
     importPayeeRaw: input.importPayeeRaw ?? null,
@@ -242,6 +245,18 @@ export async function softDeleteTransactionCascade(db: Db, transactionId: string
     .where(eq(transactions.parentTransactionId, transactionId));
   for (const child of children) {
     await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, child.id));
+  }
+
+  // A fee carved out of this row when it was linked as a transfer (see
+  // migrations/0008_transfer_fee_link.sql) is part of the same real
+  // movement — leaving it behind would strand a lone -0.31 "fee" against a
+  // transfer that no longer exists.
+  const fees = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.feeForTransactionId, transactionId));
+  for (const fee of fees) {
+    await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, fee.id));
   }
 
   await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, transactionId));

@@ -194,6 +194,14 @@ export interface TransferCandidate {
    * CROSS_CURRENCY_TOLERANCE.
    */
   approximate: boolean;
+  /**
+   * For a same-currency pair, how much of the outflow never arrived — a
+   * wire or conversion fee taken in transit. Linking books it as its own
+   * transaction in the paying account rather than letting it vanish from
+   * the budget. 0 for an exact match and for every cross-currency
+   * candidate. See src/routes/transactions.ts's sameCurrencyFeeMinor.
+   */
+  feeMinor: number;
 }
 
 /** One past import run — GET .../imports. What DELETE .../imports/:batchId undoes. */

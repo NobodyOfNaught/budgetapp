@@ -243,12 +243,25 @@ export function Register({
                                   · currency conversion — amounts won&apos;t match exactly
                                 </span>
                               )}
+                              {cand.feeMinor > 0 && (
+                                <span style={{ color: '#a56a00' }}>
+                                  {' '}
+                                  · {formatMinor(cand.feeMinor)} fee — booked separately
+                                </span>
+                              )}
                             </div>
                           ))}
                           {candidates.some((c) => c.approximate) && (
                             <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
                               Linking a conversion uses the amount that actually arrived as the transfer&apos;s value,
                               correcting the account&apos;s exchange rate for this transaction.
+                            </p>
+                          )}
+                          {candidates.some((c) => c.feeMinor > 0) && (
+                            <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+                              Less arrived than left, so the difference is a transfer fee. Linking records it as its own
+                              transaction in this account — the balance is unchanged, and the fee becomes spending you
+                              can categorize. Unlinking folds it back.
                             </p>
                           )}
                         </>

@@ -336,6 +336,13 @@ export const transactions = sqliteTable(
     transferTransactionId: text('transfer_transaction_id'),
     transferAccountId: text('transfer_account_id').references(() => accounts.id),
     parentTransactionId: text('parent_transaction_id'), // split sub-transactions
+    // Set only on a fee row carved out of a transfer leg — the difference
+    // between what left one account and what arrived in the other (a wire
+    // or conversion fee). Points at the leg it was taken from, so unlinking
+    // can fold it back in and deleting the leg can take it along. See
+    // migrations/0008_transfer_fee_link.sql for why this is a column rather
+    // than something inferred from amounts and dates.
+    feeForTransactionId: text('fee_for_transaction_id'),
     // Bank-provided FITID or a content hash, set by statement import (later).
     // Paired with the partial unique index below, re-importing an
     // overlapping statement becomes an idempotent upsert, not a dedup project.
@@ -353,6 +360,11 @@ export const transactions = sqliteTable(
     index('transactions_budget_category_date_idx').on(t.budgetId, t.categoryId, t.date),
     index('transactions_transfer_idx').on(t.transferTransactionId),
     index('transactions_parent_idx').on(t.parentTransactionId),
+    // Partial, matching migrations/0008 — only carved-out fee rows are
+    // non-NULL, so ordinary inserts never touch it.
+    index('transactions_fee_for_idx')
+      .on(t.feeForTransactionId)
+      .where(sql`${t.feeForTransactionId} is not null`),
     index('transactions_budget_revision_idx').on(t.budgetId, t.revision),
     // Excludes soft-deleted rows (migrations/0005_import_dedupe_ignores_deleted.sql)
     // — a soft-deleted row (e.g. an undone import, see

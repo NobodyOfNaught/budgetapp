@@ -161,7 +161,12 @@ export function Register({
         <p>Loading…</p>
       ) : (
         <div className="table-scroll">
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          {/* min-width, not width: 100%, so columns (Payee/Category/Memo
+              especially) take their natural width instead of being
+              force-squeezed to the container and wrapping mid-word. The
+              table-scroll wrapper's overflow-x: auto handles the case
+              where that natural width exceeds the viewport. */}
+          <table style={{ minWidth: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
                 <th align="left">Date</th>

@@ -525,6 +525,52 @@ describe('payee rules and the generic naming heuristic — provider-agnostic', (
   });
 });
 
+describe('which Wise account you import into does not change where rows land', () => {
+  // resolveCurrencyAccount matches on (budget, currency, provider) — never
+  // on "is this the account the user picked" — so a multi-balance export
+  // fans out to the same accounts either way. Worth pinning: the natural
+  // assumption is that importing into the CAD account files everything
+  // under CAD, and acting on that assumption is how a statement ends up
+  // looking like it went somewhere unexpected.
+  const MIXED = [SPLIT_CAD, SPLIT_USD, GIANT_FOOD];
+
+  async function importInto(email: string, primaryCurrency: 'USD' | 'CAD') {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    // Both Wise balances exist up front, as they would after any earlier import.
+    const usd = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Wise USD',
+      type: 'checking',
+      importProvider: 'wise',
+    });
+    const cad = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Wise CAD',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.72',
+      importProvider: 'wise',
+    });
+
+    const primary = primaryCurrency === 'USD' ? usd : cad;
+    await importCsv(app, sessionCookie, budgetId, primary.account.id, csv(...MIXED));
+
+    const rows = await review(app, sessionCookie, budgetId);
+    return rows
+      .map((r) => `${r.accountName} ${r.currencyCode} ${r.amountMinor}`)
+      .sort()
+      .join(' | ');
+  }
+
+  it('fans out identically whether the USD or the CAD balance is picked', async () => {
+    const viaUsd = await importInto('import-wise-primary-usd@example.com', 'USD');
+    const viaCad = await importInto('import-wise-primary-cad@example.com', 'CAD');
+
+    expect(viaUsd).toBe(viaCad);
+    // And it really did split across both accounts rather than pooling.
+    expect(viaUsd).toContain('Wise CAD CAD');
+    expect(viaUsd).toContain('Wise USD USD');
+  });
+});
+
 describe('a Wise top-up lands as an inflow, converted by the account it lands in', () => {
   const TOP_UP_CAD =
     'TRANSFER-2270774033,COMPLETED,IN,"2026-07-25 23:08:26","2026-07-28 10:05:13",0.31,CAD,,,' +

@@ -790,6 +790,14 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
   // Ready to Assign, which is the honest default for money that left the
   // budget and hasn't been told where from. feeForTransactionId is what
   // lets unlink fold this back in (see below).
+  //
+  // Left UNAPPROVED when it has no category, which puts it in the review
+  // queue (src/routes/imports.ts's /review is a plain approved = false
+  // filter, not an import-only one) — the app's existing "this row needs
+  // a category from you" mechanism, and the only thing that makes
+  // "uncategorized so you can categorize it" actually reachable. A fee
+  // the caller categorized outright needs no review and is approved like
+  // any other deliberate entry.
   let feeTransactionId: string | null = null;
   if (feeMinor > 0) {
     feeTransactionId = await insertTransaction(
@@ -804,6 +812,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
         budgetAmountMinor: budgetAmountFor(outflowAccount, -feeMinor),
         memo: `Fee on transfer to ${(firstIsOutflow ? secondAccount : firstAccount).name}`,
         cleared: 'cleared',
+        approved: feeCategoryId != null,
         feeForTransactionId: outflowLeg.id,
       },
       now,

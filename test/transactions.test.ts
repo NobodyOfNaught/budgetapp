@@ -1184,6 +1184,57 @@ describe('linking a same-currency transfer that lost a fee in transit', () => {
     expect(fee.budgetAmountMinor).toBe(-23); // -31 CAD at 0.73
   });
 
+  it('leaves an uncategorized fee in the review queue, which is how it gets categorized', async () => {
+    // The whole point of defaulting the fee to uncategorized is that the
+    // user decides where it belongs, and /review (a plain approved=false
+    // filter, not an import-only one) is this app's mechanism for that.
+    // Inserting it approved — insertTransaction's default — made it
+    // uncategorized AND invisible, which is the worst of both.
+    const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-review@example.com');
+
+    const { body: linked } = await callJson<{ feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId }) },
+    );
+
+    const { body } = await callJson<{ transactions: { id: string; amountMinor: number; memo: string | null }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/review`,
+    );
+    const queued = body.transactions.find((t) => t.id === linked.feeTransactionId);
+    expect(queued).toBeDefined();
+    expect(queued?.amountMinor).toBe(-31);
+    expect(queued?.memo).toBe('Fee on transfer to Wise CAD');
+
+    // The two transfer legs themselves are NOT in the queue — they are
+    // settled, not awaiting a decision.
+    const ids = body.transactions.map((t) => t.id);
+    expect(ids).not.toContain(outId);
+    expect(ids).not.toContain(inId);
+  });
+
+  it('does not queue a fee that was categorized outright', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-review-skip@example.com');
+    const categoryId = await firstCategoryId(app, sessionCookie, budgetId);
+
+    const { body: linked } = await callJson<{ feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inId, feeCategoryId: categoryId }) },
+    );
+
+    const { body } = await callJson<{ transactions: { id: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/review`,
+    );
+    expect(body.transactions.map((t) => t.id)).not.toContain(linked.feeTransactionId);
+  });
+
   it('rejects a fee category that is not in this budget', async () => {
     const { app, sessionCookie, budgetId, outId, inId } = await feeSetup('fee-bad-category@example.com');
     const { status, body } = await callJson<{ error: string }>(

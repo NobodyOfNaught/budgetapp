@@ -361,6 +361,26 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
     );
   }
 
+  // The rate to convert each destination account's rows with. The primary
+  // uses the rate supplied for THIS import (falling back to its stored
+  // one); every other account uses its own stored rate. Keyed by account
+  // id so a row is converted by where it LANDS, which is not always the
+  // account the user picked — see resolveCurrencyAccount.
+  const rateByAccountId = new Map<string, number>();
+  for (const [currencyCode, resolved] of accountByCurrency) {
+    if (currencyCode === budget.currencyCode) continue; // no conversion needed
+    if (resolved.id === primaryAccount.id) {
+      if (effectiveFxRateMicros !== undefined) rateByAccountId.set(resolved.id, effectiveFxRateMicros);
+      continue;
+    }
+    const [target] = await db
+      .select({ fxRateMicros: accounts.fxRateMicros })
+      .from(accounts)
+      .where(eq(accounts.id, resolved.id))
+      .limit(1);
+    if (target?.fxRateMicros != null) rateByAccountId.set(resolved.id, target.fxRateMicros);
+  }
+
   // Skip rows already present from an earlier import of an overlapping
   // file. The partial unique index on (account_id, import_id) is the real
   // guarantee; checking first just lets us report the count honestly
@@ -411,20 +431,25 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
           amountMinor: row.amountMinor,
           currencyCode: row.currencyCode,
           // Equal to amountMinor when the account is in the budget's
-          // currency. For the PRIMARY account (the one the user is
-          // importing into) in a foreign currency, converts via
-          // effectiveFxRateMicros — real money, so it reaches the ledger's
-          // sums whenever this account is on-budget (see
-          // src/routes/accounts.ts's PR 15 notes). A secondary
-          // currency sub-account auto-created by resolveCurrencyAccount
-          // (Wise's multi-balance case) is untouched here — it's always
-          // off-budget, so an unconverted value never reaches category
-          // math; only net worth reads it, an existing, separate
-          // imprecision this PR doesn't extend to.
-          budgetAmountMinor:
-            account.id === primaryAccount.id && isPrimaryForeign && effectiveFxRateMicros !== undefined
-              ? convertToBudgetMinor(row.amountMinor, effectiveFxRateMicros)
-              : row.amountMinor,
+          // currency, converted by whatever rate belongs to the account
+          // the row LANDS in — which is not always the account the user
+          // picked (see resolveCurrencyAccount and rateByAccountId).
+          //
+          // This deliberately covers secondary currency sub-accounts too.
+          // It originally covered only the primary, on the reasoning that
+          // a sub-account is "always off-budget so an unconverted value
+          // never reaches category math". Both halves of that stopped
+          // being true: an account can now be moved on-budget after the
+          // fact, and net worth revalues from native amounts anyway. A
+          // sub-account also only ever received TRANSFER legs back then,
+          // which carry their own derived value — until the Wise
+          // direction fix (src/import/wise.ts) made a top-up land here as
+          // an ordinary row, at which point an unconverted CAD figure
+          // would have been counted as budget-currency dollars outright.
+          budgetAmountMinor: (() => {
+            const rate = rateByAccountId.get(account.id);
+            return rate !== undefined ? convertToBudgetMinor(row.amountMinor, rate) : row.amountMinor;
+          })(),
           categoryId,
           payeeId,
           memo: row.memo,

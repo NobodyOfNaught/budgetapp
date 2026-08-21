@@ -525,6 +525,66 @@ describe('payee rules and the generic naming heuristic — provider-agnostic', (
   });
 });
 
+describe('a Wise top-up lands as an inflow, converted by the account it lands in', () => {
+  const TOP_UP_CAD =
+    'TRANSFER-2270774033,COMPLETED,IN,"2026-07-25 23:08:26","2026-07-28 10:05:13",0.31,CAD,,,' +
+    '"Palle Helenius",1900.00,CAD,"Palle Helenius",1900.0,CAD,1.0,,,"Palle Helenius","Money added",';
+
+  it('credits the CAD sub-account instead of debiting it', async () => {
+    // The regression this pair of fixes exists for: funding Wise from an
+    // external bank is direction IN with the user's name on both sides,
+    // and used to be read as an internal conversion — a DEBIT against a
+    // balance that had never received the money. See src/import/wise.ts.
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-wise-topup@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(TOP_UP_CAD));
+    expect(body.accountsCreated).toEqual(['Wise (CAD)']);
+
+    const rows = await review(app, sessionCookie, budgetId);
+    expect(rows).toHaveLength(1); // one inflow, NOT a two-legged conversion
+    expect(rows[0]).toMatchObject({ amountMinor: 190000, currencyCode: 'CAD', accountName: 'Wise (CAD)' });
+  });
+
+  it('converts that inflow using the SUB-account’s rate, not the primary’s', async () => {
+    // The row lands in Wise (CAD), which is not the account the user
+    // picked. Before this fix a secondary account's ordinary rows kept
+    // their native amount as budgetAmountMinor — so 1900 CAD would have
+    // counted as 1900 USD the moment the sub-account went on-budget.
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-wise-topup-rate@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    await importCsv(app, sessionCookie, budgetId, account.account.id, csv(TOP_UP_CAD));
+
+    const { body: list } = await callJson<{ accounts: { id: string; name: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts`,
+    );
+    const sub = list.accounts.find((a) => a.name === 'Wise (CAD)')!;
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts/${sub.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fxRate: '0.72' }),
+    });
+
+    // Re-import after undoing, so the rate is on file when rows are written.
+    const { body: batches } = await callJson<{ batches: { id: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports`,
+    );
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/${batches.batches[0]!.id}`, { method: 'DELETE' });
+    await importCsv(app, sessionCookie, budgetId, account.account.id, csv(TOP_UP_CAD));
+
+    const row = await env.DB.prepare(
+      'select amount_minor a, budget_amount_minor b from transactions where account_id = ? and deleted_at is null',
+    )
+      .bind(sub.id)
+      .first<{ a: number; b: number }>();
+    expect(row?.a).toBe(190000); // native CAD, untouched
+    expect(row?.b).toBe(136800); // 1900.00 * 0.72 = 1368.00 USD
+  });
+});
+
 describe('Vancity: parser and the generic heuristic split the work', () => {
   const VANCITY_HEADER = 'Date,Description,Debits,Credits,Balance';
   function vancityCsv(...rows: string[]): string {

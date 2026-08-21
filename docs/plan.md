@@ -1161,6 +1161,42 @@ better data than the nominal one it replaced, and silently reverting to a worse 
 unlink would be the surprising behaviour.
 
 
+**A damaging Wise parser bug, found from a real import going wrong.** `isOwnTransfer`
+matched on `sourceName === targetName` alone. Wise labels "Money added" — funding the
+account from an external bank — as **direction IN with the user's name on both sides**,
+because you are indeed sending money to yourself. So incoming funding was classified as an
+internal balance-to-balance conversion and emitted as money *leaving* the source-currency
+balance: a real 1900.00 CAD top-up became a 1900.31 CAD **debit** against a Wise CAD balance
+that had never received it.
+
+- **Nothing errors; the number is just wrong, and it compounds.** Every conversion out, no
+  funding in, so the account drifts arbitrarily negative — a real Wise CAD account reached
+  **−6,663.28 CAD** against a balance that never went below zero. The fix is one clause:
+  a conversion requires `direction === 'OUT'`. Money arriving from outside Wise is an
+  ordinary inflow in whatever currency it landed in, which the existing `IN` branch already
+  handled correctly.
+- **An existing test asserted the buggy behaviour**, and its own fixture carried Wise's
+  `"Money added"` label — the tell was right there. Corrected with the reasoning recorded
+  inline (the third time this session; same treatment as PR 7's Ready-to-Assign transfer
+  bug), and split into three cases: a genuine OUT conversion, a cross-currency top-up, and a
+  same-currency top-up.
+- **A second fix the first one exposed.** Ordinary rows landing in a *secondary* currency
+  sub-account kept their native amount as `budgetAmountMinor`. That was defended on the
+  grounds that a sub-account "is always off-budget, so an unconverted value never reaches
+  category math" — both halves of which had since stopped being true (accounts can now be
+  moved on-budget, and net worth revalues from native amounts anyway). It was also
+  unreachable while sub-accounts only ever received transfer legs, which carry their own
+  derived value. The moment the direction fix made a top-up land there as an ordinary row it
+  became reachable, and 1900 CAD would have counted as 1900 budget-currency dollars outright.
+  Conversion is now keyed by the account a row LANDS in (`rateByAccountId`), not by whether
+  it happens to be the account the user picked.
+
+Worth noting for anyone reading the account balances afterwards: correcting the parser does
+not by itself make a partial statement window balance. Wise CAD is funded by top-ups that may
+predate the exported range, so a correct opening balance is still required — the parser fix
+removes the phantom debits, it doesn't invent the history above them.
+
+
 
 ## Roadmap
 

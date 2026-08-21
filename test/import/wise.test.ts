@@ -116,12 +116,14 @@ describe('split-currency purchase (two rows sharing one id)', () => {
 });
 
 describe('own-account conversion', () => {
-  it('is a transfer, not income — detected by source and target being the same person', () => {
-    const topUp =
-      'TRANSFER-2223856519,COMPLETED,IN,"2026-07-01 14:40:43","2026-07-02 10:05:43",5.76,CAD,,,' +
-      '"Palle Helenius",1136.36,CAD,"Palle Helenius",800.0,USD,0.704002,,,"Palle Helenius","Money added",';
+  it('is a transfer, not income — an OUTbound move between the user’s own balances', () => {
+    // Source and target are both the user AND the direction is OUT: money
+    // already inside Wise changing currency.
+    const conversionRow =
+      'TRANSFER-9000000001,COMPLETED,OUT,"2026-07-01 14:40:43","2026-07-02 10:05:43",5.76,CAD,,,' +
+      '"Palle Helenius",1136.36,CAD,"Palle Helenius",800.0,USD,0.704002,,,"Palle Helenius","Converted",';
 
-    const result = parseWiseCsv(csv(topUp));
+    const result = parseWiseCsv(csv(conversionRow));
     expect(ordinaries(result)).toHaveLength(0);
 
     const [conversion] = transfers(result);
@@ -131,6 +133,50 @@ describe('own-account conversion', () => {
     expect(conversion?.toCurrencyCode).toBe('USD');
     // Settled on the 2nd, not created on the 1st — the balance moved when it finished.
     expect(conversion?.date).toBe('2026-07-02');
+  });
+
+  it('does NOT swallow an inbound top-up that merely has the user’s name on both sides', () => {
+    // NOTE: this case originally lived in the test above, asserting that
+    // the identical row WAS a conversion — the fixture even carried Wise's
+    // own "Money added" label. That expectation was wrong, and wrong in a
+    // way nothing surfaced: funding your Wise account from an external
+    // bank is direction IN with your name on both sides, because you are
+    // indeed sending money to yourself. Treated as an internal
+    // conversion it became a DEBIT against a balance that had never
+    // received the money.
+    //
+    // Repeated across a statement it drives the source-currency account
+    // arbitrarily negative — every conversion out, no funding in. A real
+    // Wise CAD account reached -6,663.28 CAD this way, against a balance
+    // that never went below zero.
+    const topUp =
+      'TRANSFER-2223856519,COMPLETED,IN,"2026-07-01 14:40:43","2026-07-02 10:05:43",5.76,CAD,,,' +
+      '"Palle Helenius",1136.36,CAD,"Palle Helenius",800.0,USD,0.704002,,,"Palle Helenius","Money added",';
+
+    const result = parseWiseCsv(csv(topUp));
+    expect(transfers(result)).toHaveLength(0); // NOT a conversion
+
+    // It is money arriving, in the currency it actually landed in. The CAD
+    // side belongs to the sending bank's statement, not to Wise's.
+    const [inflow] = ordinaries(result);
+    expect(inflow?.amountMinor).toBe(80000);
+    expect(inflow?.currencyCode).toBe('USD');
+  });
+
+  it('a same-currency top-up lands as an inflow in that currency', () => {
+    // The other real shape: CAD in, CAD out, no conversion at all. As a
+    // bogus "conversion" this became a CAD debit AND a CAD credit against
+    // the same account, netting the fee as a phantom loss.
+    const topUp =
+      'TRANSFER-2270774033,COMPLETED,IN,"2026-07-25 23:08:26","2026-07-28 10:05:13",0.31,CAD,,,' +
+      '"Palle Helenius",1900.00,CAD,"Palle Helenius",1900.0,CAD,1.0,,,"Palle Helenius","Money added",';
+
+    const result = parseWiseCsv(csv(topUp));
+    expect(transfers(result)).toHaveLength(0);
+
+    const [inflow] = ordinaries(result);
+    expect(inflow?.amountMinor).toBe(190000); // what actually arrived
+    expect(inflow?.currencyCode).toBe('CAD');
   });
 });
 

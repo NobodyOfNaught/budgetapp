@@ -106,8 +106,30 @@ function sourceDebitMinor(row: WiseRow): number {
   return row.sourceMinor + fee;
 }
 
+/**
+ * A conversion between the user's OWN Wise balances — CAD sitting in Wise
+ * becoming USD sitting in Wise. Both sides carry the user's own name.
+ *
+ * The `direction === 'OUT'` half is load-bearing and was missing
+ * originally, which produced a genuinely damaging bug. Wise labels
+ * "Money added" — funding the account from an external bank — as
+ * direction IN with the user's name on BOTH sides, because they are
+ * indeed sending money to themselves. Matching on the names alone
+ * therefore classified incoming funding as an internal conversion, and
+ * emitted it as money LEAVING the source-currency balance:
+ * `TRANSFER-2270774033`, a real 1900.00 CAD top-up, became a 1900.31 CAD
+ * debit against a Wise CAD balance that had never received it.
+ *
+ * Repeated over a statement's worth of top-ups the account drifts
+ * arbitrarily negative — every conversion out, no funding in — which is
+ * exactly what a real Wise CAD account did (−6,663.28 CAD against a
+ * balance that never went below zero). Nothing errors; the number is just
+ * wrong. Money arriving from outside Wise is an ordinary INFLOW into
+ * whatever currency it landed in, which is what the direction === 'IN'
+ * branch below already does correctly.
+ */
 function isOwnTransfer(row: WiseRow): boolean {
-  return row.sourceName !== '' && row.sourceName === row.targetName;
+  return row.direction === 'OUT' && row.sourceName !== '' && row.sourceName === row.targetName;
 }
 
 export function parseWiseCsv(csvText: string): ParseResult {

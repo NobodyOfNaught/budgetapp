@@ -230,6 +230,26 @@ export interface ReviewTransaction {
   payeeName: string | null;
   importPayeeRaw: string | null;
   transferAccountId: string | null;
+  /**
+   * The other leg of the transfer, when this row is one. Its amount is
+   * shown alongside this row's rather than assumed to be the mirror
+   * image: across currencies the two legs are different numbers by
+   * definition, and within one currency they can differ by a fee taken in
+   * transit. All null when the row isn't a transfer.
+   */
+  transferAccountName: string | null;
+  transferDate: string | null;
+  transferAmountMinor: number | null;
+  transferCurrencyCode: string | null;
+  /**
+   * The transfer leg this row is a carved-out fee of — see
+   * src/routes/transactions.ts's link-transfer. All null for anything
+   * that isn't a fee row.
+   */
+  feeForAccountName: string | null;
+  feeForDate: string | null;
+  feeForAmountMinor: number | null;
+  feeForCurrencyCode: string | null;
 }
 
 // ---------------------------------------------------------------------------

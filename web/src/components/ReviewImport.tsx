@@ -176,13 +176,35 @@ export function ReviewImport({
                       {showRaw && (
                         <div style={{ fontSize: '0.85em', color: '#666' }}>{row.importPayeeRaw}</div>
                       )}
+                      {/* The other leg, spelled out. Its amount is shown
+                          rather than left implied because the two legs
+                          need not mirror each other — a conversion or a
+                          fee makes them genuinely different numbers. */}
+                      {row.transferAccountName && row.transferAmountMinor !== null && (
+                        <div style={{ fontSize: '0.85em', color: '#666' }}>
+                          ↔ {row.transferAccountName} · {row.transferDate} ·{' '}
+                          <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                            {formatMinor(row.transferAmountMinor, row.transferCurrencyCode ?? row.currencyCode)}
+                          </span>
+                        </div>
+                      )}
+                      {row.feeForAccountName && row.feeForAmountMinor !== null && (
+                        <div style={{ fontSize: '0.85em', color: '#666' }}>
+                          fee on the transfer from {row.feeForAccountName} · {row.feeForDate} ·{' '}
+                          <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                            {formatMinor(row.feeForAmountMinor, row.feeForCurrencyCode ?? row.currencyCode)}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td align="right" style={{ color: amountColor(row.amountMinor), fontVariantNumeric: 'tabular-nums' }}>
                       {formatMinor(row.amountMinor, row.currencyCode)}
                     </td>
                     <td>
                       {row.transferAccountId ? (
-                        <span style={{ color: '#666' }}>(transfer)</span>
+                        <span style={{ color: '#666' }}>
+                          {row.transferAccountName ? `Transfer : ${row.transferAccountName}` : '(transfer)'}
+                        </span>
                       ) : (
                         <select value={drafts[row.id] ?? ''} onChange={(e) => setDrafts((d) => ({ ...d, [row.id]: e.target.value }))}>
                           <option value="">(uncategorized)</option>

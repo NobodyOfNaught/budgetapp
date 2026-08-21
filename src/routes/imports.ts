@@ -1,4 +1,5 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/sqlite-core';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
@@ -212,6 +213,20 @@ importsRoute.get('/review', async (c) => {
   const budgetId = budgetIdParam(c);
   const db = getDb(c.env);
 
+  // The other half of a transfer, and the account it sits in. "(transfer)"
+  // alone told the user a row was linked but not to WHAT, which is the one
+  // thing worth confirming about a transfer — and it matters more since
+  // the two legs need not be equal any more: they differ by a conversion
+  // rate, or by a fee taken in transit (see src/routes/transactions.ts's
+  // sameCurrencyFeeMinor). Seeing "-1900.00 CAD -> Wise CAD +1900.00 CAD"
+  // is what makes a mislink obvious.
+  const counterpart = alias(transactions, 'counterpart');
+  const counterpartAccount = alias(accounts, 'counterpart_account');
+  // The transfer leg a FEE row was carved out of — same question ("what
+  // is this attached to?") for the rows that aren't transfers themselves.
+  const feeParent = alias(transactions, 'fee_parent');
+  const feeParentAccount = alias(accounts, 'fee_parent_account');
+
   const rows = await db
     .select({
       id: transactions.id,
@@ -225,10 +240,22 @@ importsRoute.get('/review', async (c) => {
       payeeName: payees.name,
       importPayeeRaw: transactions.importPayeeRaw,
       transferAccountId: transactions.transferAccountId,
+      transferAccountName: counterpartAccount.name,
+      transferDate: counterpart.date,
+      transferAmountMinor: counterpart.amountMinor,
+      transferCurrencyCode: counterpart.currencyCode,
+      feeForAccountName: feeParentAccount.name,
+      feeForDate: feeParent.date,
+      feeForAmountMinor: feeParent.amountMinor,
+      feeForCurrencyCode: feeParent.currencyCode,
     })
     .from(transactions)
     .innerJoin(accounts, eq(accounts.id, transactions.accountId))
     .leftJoin(payees, eq(payees.id, transactions.payeeId))
+    .leftJoin(counterpart, eq(counterpart.id, transactions.transferTransactionId))
+    .leftJoin(counterpartAccount, eq(counterpartAccount.id, counterpart.accountId))
+    .leftJoin(feeParent, eq(feeParent.id, transactions.feeForTransactionId))
+    .leftJoin(feeParentAccount, eq(feeParentAccount.id, feeParent.accountId))
     .where(
       and(
         eq(transactions.budgetId, budgetId),

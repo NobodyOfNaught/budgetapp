@@ -58,6 +58,15 @@ interface ReviewRow {
   accountName: string;
   payeeName: string | null;
   importPayeeRaw: string | null;
+  transferAccountId: string | null;
+  transferAccountName: string | null;
+  transferDate: string | null;
+  transferAmountMinor: number | null;
+  transferCurrencyCode: string | null;
+  feeForAccountName: string | null;
+  feeForDate: string | null;
+  feeForAmountMinor: number | null;
+  feeForCurrencyCode: string | null;
 }
 
 async function createAccount(app: App, cookie: string, budgetId: string, body: Record<string, unknown>) {
@@ -786,5 +795,89 @@ describe('authorization', () => {
         })
       ).status,
     ).toBe(403);
+  });
+});
+
+describe('the review queue names what a transfer is linked to', () => {
+  // "(transfer)" told the user a row was linked without saying to what,
+  // which is the one thing worth confirming about a transfer — and it
+  // matters more now that the two legs need not be equal: they differ by
+  // a conversion rate, or by a fee taken in transit.
+  async function linkedPair(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const vancity = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Vancity Gold',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    const wise = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Wise CAD',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.72',
+    });
+
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: vancity.account.id, date: '2026-07-25', amount: '-1900.31' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: wise.account.id, date: '2026-07-28', amount: '1900.00' }),
+    });
+    const { body: linked } = await callJson<{ feeTransactionId: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inn.transactionId }) },
+    );
+    return { app, sessionCookie, budgetId, outId: out.transactionId, inId: inn.transactionId, feeId: linked.feeTransactionId };
+  }
+
+  it('carries the fee row and names the transfer leg it was carved from', async () => {
+    const { app, sessionCookie, budgetId, feeId } = await linkedPair('review-fee-context@example.com');
+    const rows = await review(app, sessionCookie, budgetId);
+
+    const fee = rows.find((r) => r.id === feeId)!;
+    expect(fee.feeForAccountName).toBe('Vancity Gold');
+    expect(fee.feeForDate).toBe('2026-07-25');
+    // The leg AFTER the fee was carved out — what the transfer actually
+    // moved, not the pre-fee figure the statement printed.
+    expect(fee.feeForAmountMinor).toBe(-190000);
+    expect(fee.feeForCurrencyCode).toBe('CAD');
+    // A fee is not itself a transfer, so the transfer fields stay empty.
+    expect(fee.transferAccountName).toBeNull();
+  });
+
+  it('names the counterpart account and its own amount on a transfer leg', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await linkedPair('review-transfer-context@example.com');
+    // Both legs are approved by the link, so put one back in the queue the
+    // way an imported row would arrive.
+    await env.DB.prepare('update transactions set approved = 0 where id in (?, ?)').bind(outId, inId).run();
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const out = rows.find((r) => r.id === outId)!;
+    expect(out.transferAccountName).toBe('Wise CAD');
+    expect(out.transferDate).toBe('2026-07-28');
+    expect(out.transferAmountMinor).toBe(190000);
+    expect(out.transferCurrencyCode).toBe('CAD');
+
+    // And symmetrically from the other side.
+    const inn = rows.find((r) => r.id === inId)!;
+    expect(inn.transferAccountName).toBe('Vancity Gold');
+    expect(inn.transferAmountMinor).toBe(-190000);
+  });
+
+  it('leaves every transfer field null on an ordinary row', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('review-no-transfer@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD));
+
+    const [row] = await review(app, sessionCookie, budgetId);
+    expect(row?.transferAccountId).toBeNull();
+    expect(row?.transferAccountName).toBeNull();
+    expect(row?.transferAmountMinor).toBeNull();
+    expect(row?.feeForAccountName).toBeNull();
   });
 });

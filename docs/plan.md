@@ -1197,6 +1197,57 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 18 — Card payments made by linking, and what backs Ready to Assign
+
+Two changes from one investigation: a user's Ready to Assign read \$990.95 against \$521.37 of
+actual cash, which is not a state that should be reachable.
+
+**Linked card payments never drained the earmark.** `src/domain/ledger.ts` documents the only
+shape that works: the card-side leg is an uncategorized transfer (contributing nothing) and
+the OTHER leg is categorized to that card's payment category, which is what spends the money
+set aside. But `link-transfer` *refuses* a categorized leg (`is_categorized`), and both halves
+of an imported card payment arrive uncategorized — so a payment built by linking two imported
+rows could never have the leg the mechanic needs. Six real card payments totalling \$1,861.50
+had moved cash out of chequing without touching any category or Ready to Assign. Two rules
+that each made sense alone and did not compose.
+
+Linking now recognizes the shape and categorizes the paying leg itself. Direction is checked
+rather than assumed: money moving INTO a credit account pays debt down and is a payment; money
+moving out is a cash advance and gets nothing. Unlinking clears the category again, but only
+the auto-set shape — a payment category whose linked account is the *other* leg's account — so
+a category the user chose survives.
+
+**The reconciliation is now on screen.** `GET /months/:month` returns `cashOnHandMinor` and
+`creditDebtMinor`, balances as at the END of the month being viewed (computed from the rows the
+ledger already loads, which are fetched `date < nextMonth(month)` — the same window). The
+budget screen shows cash, card balances, un-budgeted card debt and current-month overspending
+under Ready to Assign, and says so explicitly when Ready to Assign exceeds the cash backing it.
+
+The identity worth recording, because the obvious version of it is wrong:
+
+```
+cashOnHand + creditDebt = readyToAssign
+                        + sum(available)
+                        + sum(categorized spending on card accounts)
+                        + sum(uncategorized transfer legs on card accounts)
+```
+
+Both card terms are real and both are load-bearing. The first is the credit-card doubling: a
+purchase drops the spending category and raises the payment category, leaving `sum(available)`
+unchanged while the card balance falls. The second is the card-side half of every payment —
+uncategorized by design, since the *other* leg is the one carrying the payment category.
+
+In a cash-only budget both terms are zero and the familiar
+`cash = readyToAssign + sum(available)` holds exactly. A card *purchase* alone doesn't break it
+either — the debt and the categorized spending cancel. What breaks it is **uncategorized** card
+debt: an imported card balance goes straight into the payment category as debt nobody has
+budgeted for, never passing through Ready to Assign, which therefore keeps reading as though
+that money were free. Each of those cases has a test.
+
+Verified against the real UAT budget rather than derived on paper: the four-term form closes to
+the cent (`469.58 = -1391.92 + 1861.50`), and an earlier two-term draft of this note was wrong
+precisely because it omitted the payment-leg term.
+
 ### PR 17 — Import cutoff date
 
 Bank exports don't respect the date a budget started. A Simplii or Vancity file downloaded

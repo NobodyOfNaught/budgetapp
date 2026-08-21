@@ -12,6 +12,7 @@ import {
 import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
 import { getDb, type Db } from '../db/client';
 import { accounts, budgets, categories, payees, transactions } from '../db/schema';
+import { CREDIT_ACCOUNT_KINDS, type AccountKind } from '../domain/types';
 import { addDays } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import { convertToBudgetMinor, parseAmountToMinor } from '../lib/money';
@@ -755,6 +756,50 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
     secondBudgetAmountMinor = -firstBudgetAmountMinor;
   }
 
+  // A credit-card PAYMENT, and which leg pays it.
+  //
+  // This is the shape src/domain/ledger.ts documents as the only one that
+  // drains a card's earmark: the card-side leg is an uncategorized
+  // transfer (contributing nothing), and the OTHER leg is categorized to
+  // that card's payment category, which is what actually spends the money
+  // set aside. Linking used to leave both legs uncategorized — the only
+  // thing it could do, since a categorized leg is refused outright — so
+  // every card payment built by linking two imported rows moved real cash
+  // out of chequing without touching any category or Ready to Assign. Two
+  // rules that each made sense alone and did not fit together; this is
+  // where they meet.
+  //
+  // Direction matters and is checked rather than assumed: money moving
+  // INTO the card (a positive leg on the credit account) pays debt down
+  // and is a payment. Money moving OUT of one is a cash advance, which is
+  // not a payment and gets no category.
+  const firstIsCredit = CREDIT_ACCOUNT_KINDS.has(firstAccount.type as AccountKind);
+  const secondIsCredit = CREDIT_ACCOUNT_KINDS.has(secondAccount.type as AccountKind);
+  let paymentCategoryId: string | null = null;
+  let payingLegId: string | null = null;
+  if (firstIsCredit !== secondIsCredit) {
+    const cardLeg = firstIsCredit ? first : second;
+    const cardAccountId = firstIsCredit ? firstAccount.id : secondAccount.id;
+    if (cardLeg.amountMinor > 0) {
+      const [paymentCategory] = await db
+        .select({ id: categories.id })
+        .from(categories)
+        .where(
+          and(
+            eq(categories.budgetId, budgetId),
+            eq(categories.linkedAccountId, cardAccountId),
+            eq(categories.kind, 'credit_card_payment'),
+            isNull(categories.deletedAt),
+          ),
+        )
+        .limit(1);
+      if (paymentCategory) {
+        paymentCategoryId = paymentCategory.id;
+        payingLegId = firstIsCredit ? second.id : first.id;
+      }
+    }
+  }
+
   const now = Date.now();
   // Each leg's payee names the OTHER account, matching what the create
   // path builds (see getOrCreateTransferPayee) so a linked transfer is
@@ -770,6 +815,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
       payeeId: firstPayeeId,
       amountMinor: firstIsOutflow ? outflowAmountMinor : first.amountMinor,
       budgetAmountMinor: firstBudgetAmountMinor,
+      categoryId: payingLegId === first.id ? paymentCategoryId : first.categoryId,
       updatedAt: now,
     })
     .where(eq(transactions.id, first.id));
@@ -781,6 +827,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
       payeeId: secondPayeeId,
       amountMinor: firstIsOutflow ? second.amountMinor : outflowAmountMinor,
       budgetAmountMinor: secondBudgetAmountMinor,
+      categoryId: payingLegId === second.id ? paymentCategoryId : second.categoryId,
       updatedAt: now,
     })
     .where(eq(transactions.id, second.id));
@@ -819,7 +866,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
     );
   }
 
-  return c.json({ status: 'ok', feeMinor, feeTransactionId });
+  return c.json({ status: 'ok', feeMinor, feeTransactionId, paymentCategoryId });
 });
 
 // Undoes a link, leaving both rows exactly as ordinary transactions again
@@ -856,7 +903,17 @@ transactionsRoute.post('/:transactionId/unlink-transfer', requireBudgetMember('e
   // legs are checked because either one may be the outflow that paid it.
   const restored = await restoreTransferFees(db, [row.id, row.transferTransactionId], now);
 
-  return c.json({ status: 'ok', feeRestoredMinor: restored });
+  // Drop a payment category that only made sense as half of THIS pair.
+  // link-transfer categorizes the paying leg of a card payment to the
+  // card's payment category; once the two rows are no longer a pair, that
+  // categorization claims to pay down a card this row is no longer
+  // connected to — the same reason the "Transfer : X" payee is cleared
+  // above. Only the auto-set shape is cleared: a payment category whose
+  // linked account is the OTHER leg's account. Anything the user chose
+  // themselves is left alone.
+  const clearedCategories = await clearPairedPaymentCategories(db, budgetId, [row.id, row.transferTransactionId], now);
+
+  return c.json({ status: 'ok', feeRestoredMinor: restored, clearedCategories });
 });
 
 /**
@@ -907,6 +964,45 @@ async function restoreTransferFees(db: Db, legIds: string[], now: number): Promi
     total += Math.abs(fee.amountMinor);
   }
   return total;
+}
+
+/**
+ * Clears a credit-card payment category from legs that were only carrying
+ * it because they formed a card payment together — the categorization
+ * link-transfer applies. `legs` is the pair as it stood BEFORE unlinking,
+ * so each leg is checked against the other's account.
+ */
+async function clearPairedPaymentCategories(db: Db, budgetId: string, legIds: string[], now: number): Promise<number> {
+  const rows = await db
+    .select({
+      id: transactions.id,
+      accountId: transactions.accountId,
+      categoryId: transactions.categoryId,
+    })
+    .from(transactions)
+    .where(and(inArray(transactions.id, legIds), eq(transactions.budgetId, budgetId), isNull(transactions.deletedAt)));
+
+  let cleared = 0;
+  for (const leg of rows) {
+    if (leg.categoryId === null) continue;
+    const other = rows.find((r) => r.id !== leg.id);
+    if (!other) continue;
+    const [category] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(
+        and(
+          eq(categories.id, leg.categoryId),
+          eq(categories.kind, 'credit_card_payment'),
+          eq(categories.linkedAccountId, other.accountId),
+        ),
+      )
+      .limit(1);
+    if (!category) continue;
+    await db.update(transactions).set({ categoryId: null, updatedAt: now }).where(eq(transactions.id, leg.id));
+    cleared++;
+  }
+  return cleared;
 }
 
 // ---------------------------------------------------------------------------

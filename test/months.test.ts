@@ -8,6 +8,8 @@ interface MonthView {
   month: string;
   readyToAssign: number;
   categories: Record<string, { assigned: number; activity: number; available: number }>;
+  cashOnHandMinor: number;
+  creditDebtMinor: number;
 }
 
 async function createAccount(
@@ -443,5 +445,184 @@ describe('covering an overspent category', () => {
       },
     );
     expect(after.categories[categoryId]).toMatchObject({ assigned: 4473, available: 0 });
+  });
+});
+
+describe('what actually backs Ready to Assign', () => {
+  async function month(
+    app: Awaited<ReturnType<typeof signInNewUser>>['app'],
+    cookie: string,
+    budgetId: string,
+    m: string,
+  ) {
+    const { body } = await callJson<MonthView>(app, cookie, `/api/v1/budgets/${budgetId}/months/${m}`);
+    return body;
+  }
+
+  it('in a cash-only budget, cash on hand IS Ready to Assign plus every available', async () => {
+    // The identity people expect, and it holds exactly — no credit cards
+    // involved. This is the baseline the credit-card case below departs
+    // from, so it is pinned first.
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-cash-only@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const [groceries] = await spendingCategoryIds(app, sessionCookie, budgetId);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '500.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03/assignments`, {
+      method: 'PUT',
+      body: JSON.stringify({ assignments: [{ categoryId: groceries!.id, assigned: '200.00' }] }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-10', amount: '-75.00', categoryId: groceries!.id }),
+    });
+
+    const view = await month(app, sessionCookie, budgetId, '2026-03');
+    const sumAvailable = Object.values(view.categories).reduce((s, c) => s + c.available, 0);
+
+    expect(view.cashOnHandMinor).toBe(42500); // 500.00 in, 75.00 spent
+    expect(view.creditDebtMinor).toBe(0);
+    expect(view.readyToAssign + sumAvailable).toBe(view.cashOnHandMinor);
+  });
+
+  it('with a credit card, the gap is exactly the categorized card spending', async () => {
+    // Why Ready to Assign can legitimately read higher than the cash
+    // backing it. A card purchase moves money twice — the spending
+    // category falls and the card's payment category rises, leaving
+    // sum(available) unchanged — while the card balance falls. So the
+    // identity picks up one extra term, and this pins what it is.
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-with-card@example.com');
+    const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const card = await createAccount(app, sessionCookie, budgetId, { name: 'Visa', type: 'credit_card' });
+    const [groceries] = await spendingCategoryIds(app, sessionCookie, budgetId);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-01', amount: '500.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03/assignments`, {
+      method: 'PUT',
+      body: JSON.stringify({ assignments: [{ categoryId: groceries!.id, assigned: '200.00' }] }),
+    });
+    // 75.00 of groceries on the CARD.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-10', amount: '-75.00', categoryId: groceries!.id }),
+    });
+
+    const view = await month(app, sessionCookie, budgetId, '2026-03');
+    const sumAvailable = Object.values(view.categories).reduce((s, c) => s + c.available, 0);
+
+    expect(view.cashOnHandMinor).toBe(50000); // untouched — nothing left chequing
+    expect(view.creditDebtMinor).toBe(-7500);
+
+    // cash + debt = RTA + sum(available) + categorized card spending
+    expect(view.cashOnHandMinor + view.creditDebtMinor).toBe(view.readyToAssign + sumAvailable + -7500);
+    // Note what that means here: the debt IS the categorized spending, so
+    // the two extra terms cancel and the cash identity still holds. A
+    // card purchase alone does not make Ready to Assign overstate cash —
+    // the next case is what does.
+    expect(view.readyToAssign + sumAvailable).toBe(view.cashOnHandMinor);
+  });
+
+  it('UNcategorized card debt is what pushes Ready to Assign above the cash backing it', async () => {
+    // The real-world shape: a card imported with a balance already on it.
+    // That row is uncategorized on a credit account, so the ledger sends
+    // it straight into the payment category as debt nobody has budgeted
+    // for — it never passes through Ready to Assign, which therefore keeps
+    // reading as though the money were free. This is the case worth
+    // showing on screen, because the headline number looks healthier than
+    // the budget is and nothing about it says so.
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-card-debt@example.com');
+    const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const card = await createAccount(app, sessionCookie, budgetId, { name: 'Visa', type: 'credit_card' });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-01', amount: '500.00' }),
+    });
+    // Pre-existing card balance, uncategorized, as an import leaves it.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-02', amount: '-300.00' }),
+    });
+
+    const view = await month(app, sessionCookie, budgetId, '2026-03');
+    const sumAvailable = Object.values(view.categories).reduce((s, c) => s + c.available, 0);
+
+    expect(view.cashOnHandMinor).toBe(50000);
+    expect(view.creditDebtMinor).toBe(-30000);
+    // Ready to Assign still reads the full 500 — the card debt went to the
+    // payment category, not through here.
+    expect(view.readyToAssign).toBe(50000);
+    expect(sumAvailable).toBe(-30000);
+    // So RTA alone matches cash, but only because the 300 of debt is
+    // parked in a category showing -300. Assigning all 500 would leave
+    // nothing for a card that needs 300.
+    expect(view.readyToAssign + sumAvailable).toBe(20000);
+    expect(view.readyToAssign).toBeGreaterThan(view.readyToAssign + sumAvailable);
+  });
+
+  it('reports balances as at the END of the month being viewed, not today', async () => {
+    // The figures sit beside a month's Ready to Assign, so they have to be
+    // scoped the same way — otherwise looking at a past month would pair
+    // its RTA with a balance from the future.
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-month-scoped@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '100.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-04-01', amount: '250.00' }),
+    });
+
+    expect((await month(app, sessionCookie, budgetId, '2026-03')).cashOnHandMinor).toBe(10000);
+    expect((await month(app, sessionCookie, budgetId, '2026-04')).cashOnHandMinor).toBe(35000);
+  });
+
+  it('counts a split once, not twice', async () => {
+    // The parent carries the total and the children carry the parts, so a
+    // naive sum over every row would double every split.
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-splits@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const cats = await spendingCategoryIds(app, sessionCookie, budgetId);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'split',
+        accountId,
+        date: '2026-03-05',
+        splits: [
+          { amount: '-30.00', categoryId: cats[0]!.id },
+          { amount: '-20.00', categoryId: cats[1]!.id },
+        ],
+      }),
+    });
+
+    expect((await month(app, sessionCookie, budgetId, '2026-03')).cashOnHandMinor).toBe(-5000);
+  });
+
+  it('ignores tracking accounts — they are not budget money', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('backing-tracking@example.com');
+    const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const tracked = await createAccount(app, sessionCookie, budgetId, { name: 'Brokerage', type: 'tracking_asset' });
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-01', amount: '100.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: tracked, date: '2026-03-01', amount: '9000.00' }),
+    });
+
+    expect((await month(app, sessionCookie, budgetId, '2026-03')).cashOnHandMinor).toBe(10000);
   });
 });

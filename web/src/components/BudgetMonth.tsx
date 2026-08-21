@@ -52,6 +52,53 @@ function monthLabel(month: string): string {
   });
 }
 
+/**
+ * What actually backs Ready to Assign.
+ *
+ * Ready to Assign is "money not yet given a job", which is NOT the same as
+ * "cash you have" the moment a credit card is involved — a card purchase
+ * moves money twice (the spending category falls, the card's payment
+ * category rises) while the card balance falls, so Ready to Assign can sit
+ * well above the cash on hand with the difference being debt nobody has
+ * budgeted for. That gap is invisible from the number alone, and it is
+ * exactly the thing that makes the headline figure look healthier than the
+ * budget is, so it is spelled out rather than left to be worked out.
+ */
+function Reconciliation({ view, categoryGroups }: { view: MonthView; categoryGroups: CategoryGroup[] }) {
+  const paymentCategoryIds = new Set(
+    categoryGroups.flatMap((g) => g.categories.filter((c) => c.kind === 'credit_card_payment').map((c) => c.id)),
+  );
+
+  let paymentShortfall = 0;
+  let overspent = 0;
+  for (const [id, amounts] of Object.entries(view.categories)) {
+    if (amounts.available >= 0) continue;
+    if (paymentCategoryIds.has(id)) paymentShortfall += amounts.available;
+    else overspent += amounts.available;
+  }
+
+  const uncoveredByCash = view.readyToAssign - view.cashOnHandMinor;
+
+  return (
+    <div style={{ fontSize: '0.9em', color: '#666', margin: '0 0 0.75rem' }}>
+      <span>Cash in budget accounts: {formatMinor(view.cashOnHandMinor)}</span>
+      {view.creditDebtMinor !== 0 && <span> · Card balances: {formatMinor(view.creditDebtMinor)}</span>}
+      {paymentShortfall < 0 && (
+        <span style={{ color: '#c0392b' }}> · Card debt not yet budgeted for: {formatMinor(paymentShortfall)}</span>
+      )}
+      {overspent < 0 && (
+        <span style={{ color: '#c0392b' }}> · Overspent this month: {formatMinor(overspent)}</span>
+      )}
+      {uncoveredByCash > 0 && (
+        <div style={{ color: '#a56a00', marginTop: '0.25rem' }}>
+          Ready to Assign is {formatMinor(uncoveredByCash)} more than the cash in your budget accounts — assigning all
+          of it would spend money the accounts don&apos;t hold.
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface FlatCategory {
   id: string;
   name: string;
@@ -328,6 +375,8 @@ export function BudgetMonth({
             {formatMinor(view?.readyToAssign ?? 0)}
           </strong>
         </div>
+
+        {view && <Reconciliation view={view} categoryGroups={categoryGroups} />}
 
         {error && <p style={{ color: '#c0392b' }}>{error}</p>}
 

@@ -141,6 +141,15 @@ export interface MonthView {
   readyToAssign: number;
   categories: Record<string, CategoryMonthAmounts>;
   targets: Record<string, TargetResultView>;
+  /**
+   * Balances at the END of this month, in the budget's currency. Ready to
+   * Assign is money without a job, which is not the same as money you
+   * have once a credit card is in play — see the doc comment on
+   * src/routes/months.ts's MonthView for the identity and why the two
+   * legitimately differ.
+   */
+  cashOnHandMinor: number;
+  creditDebtMinor: number;
 }
 
 /** GET/PUT /budgets/:id/targets(/:categoryId) — the raw stored target, decimal amount like everywhere else at the API boundary. */

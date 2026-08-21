@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
 import { computeLedger } from '../domain/ledger';
 import { computeTargets } from '../domain/targets';
-import type { MonthResult, TargetResult } from '../domain/types';
+import { CREDIT_ACCOUNT_KINDS, type AccountKind, type MonthResult, type TargetResult } from '../domain/types';
 import { getDb, type Db } from '../db/client';
 import { accounts, categories, categoryMonths, categoryTargets, transactions } from '../db/schema';
 import { nextMonth } from '../lib/dates';
@@ -21,6 +21,31 @@ const MONTH_RE = /^\d{4}-\d{2}$/;
 // merged in at the API layer, not something the engine itself computes.
 interface MonthView extends MonthResult {
   targets: Record<string, TargetResult>;
+  /**
+   * Account balances as at the END of this month, in the budget's
+   * currency, so Ready to Assign can be read against the money that
+   * actually backs it.
+   *
+   * Worth stating why these aren't equal and don't have to be. In a
+   * cash-only budget the identity is exact:
+   *
+   *   cashOnHand = readyToAssign + sum(category available)
+   *
+   * Credit cards break it by design. A card purchase moves money twice —
+   * the spending category falls and the card's payment category rises, so
+   * `sum(available)` is unchanged — while the card's balance falls. The
+   * general form is therefore
+   *
+   *   cashOnHand + creditDebt = readyToAssign + sum(available)
+   *                             + sum(categorized credit-card spending)
+   *
+   * which is why Ready to Assign can legitimately exceed the cash on hand
+   * (card debt nobody has budgeted for yet) and why showing the two side
+   * by side is worth doing rather than assuming one implies the other.
+   */
+  cashOnHandMinor: number;
+  /** Balance of on-budget credit accounts at the end of this month — negative when money is owed. */
+  creditDebtMinor: number;
 }
 
 /**
@@ -93,7 +118,26 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
     month,
   });
 
-  return { ...monthResult, targets };
+  // Balances at the end of this month, from the rows already loaded above
+  // (they're fetched `date < nextMonth(month)` for the ledger, which is
+  // exactly the window a month-end balance needs). Split CHILDREN are
+  // skipped because the parent already carries their total — counting both
+  // would double every split.
+  const creditAccountIds = new Set(
+    accountRows.filter((a) => a.onBudget && CREDIT_ACCOUNT_KINDS.has(a.type as AccountKind)).map((a) => a.id),
+  );
+  const cashAccountIds = new Set(
+    accountRows.filter((a) => a.onBudget && !CREDIT_ACCOUNT_KINDS.has(a.type as AccountKind)).map((a) => a.id),
+  );
+  let cashOnHandMinor = 0;
+  let creditDebtMinor = 0;
+  for (const row of transactionRows) {
+    if (row.parentTransactionId !== null) continue;
+    if (cashAccountIds.has(row.accountId)) cashOnHandMinor += row.budgetAmountMinor;
+    else if (creditAccountIds.has(row.accountId)) creditDebtMinor += row.budgetAmountMinor;
+  }
+
+  return { ...monthResult, targets, cashOnHandMinor, creditDebtMinor };
 }
 
 const assignmentsSchema = z.object({

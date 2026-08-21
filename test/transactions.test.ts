@@ -781,6 +781,193 @@ describe('linking two existing transactions as a transfer', () => {
   });
 });
 
+// PR 14 required both legs in the same currency (currency_mismatch was a
+// 400). That left the commonest real cross-border movement unlinkable: pay
+// a foreign account from a domestic one and the two legs are different
+// numbers by definition. See docs/plan.md's Phase 5 notes.
+describe('linking a transfer across currencies', () => {
+  async function crossCurrencySetup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    // CAD chequing at a nominal 0.73, and a USD account.
+    const cad = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Vancity',
+      type: 'checking',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    const usd = await createAccount(app, sessionCookie, budgetId, { name: 'Wise USD', type: 'checking' });
+
+    // CAD 2093.80 out -> budgetAmountMinor -152847 at the nominal rate.
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: cad, date: '2026-08-14', amount: '-2093.80' }),
+    });
+    // USD 1500.00 actually arrived — the realized value.
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: usd, date: '2026-08-14', amount: '1500.00' }),
+    });
+    return { app, sessionCookie, budgetId, cad, usd, outId: out.transactionId, inId: inn.transactionId };
+  }
+
+  async function readyToAssign(app: Awaited<ReturnType<typeof signInNewUser>>['app'], cookie: string, budgetId: string) {
+    const { body } = await callJson<{ readyToAssign: number }>(app, cookie, `/api/v1/budgets/${budgetId}/months/2026-08`);
+    return body.readyToAssign;
+  }
+
+  it('offers the opposite-signed foreign row as an approximate candidate', async () => {
+    const { app, sessionCookie, budgetId, inId } = await crossCurrencySetup('xfx-candidate@example.com');
+    const { body } = await callJson<{ candidates: { id: string; currencyCode: string; approximate: boolean }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${inId}/transfer-candidates`,
+    );
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]).toMatchObject({ currencyCode: 'CAD', approximate: true });
+  });
+
+  it('does not offer a foreign row whose value is outside the tolerance band', async () => {
+    const { app, sessionCookie, budgetId, cad } = await crossCurrencySetup('xfx-out-of-band@example.com');
+    // A CAD 50.00 outflow is nowhere near the USD 1500.00 inflow.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: cad, date: '2026-08-14', amount: '-50.00' }),
+    });
+    const { body: reg } = await callJson<{ transactions: { id: string; amountMinor: number }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${cad}/transactions`,
+    );
+    const small = reg.transactions.find((r) => r.amountMinor === -5000)!;
+    const { body } = await callJson<{ candidates: { id: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${small.id}/transfer-candidates`,
+    );
+    expect(body.candidates).toEqual([]);
+  });
+
+  it('links the pair and rewrites the CAD leg to the amount that actually arrived', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await crossCurrencySetup('xfx-link@example.com');
+
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+    expect(status).toBe(200);
+
+    const rows = await env.DB.prepare(
+      'select id, amount_minor as amountMinor, budget_amount_minor as budgetAmountMinor from transactions where id in (?, ?)',
+    )
+      .bind(outId, inId)
+      .all<{ id: string; amountMinor: number; budgetAmountMinor: number }>();
+    const out = rows.results.find((r) => r.id === outId)!;
+    const inn = rows.results.find((r) => r.id === inId)!;
+
+    // Natives untouched — the accounts still hold what they hold.
+    expect(out.amountMinor).toBe(-209380);
+    expect(inn.amountMinor).toBe(150000);
+    // Budget values are now exactly equal and opposite, taken from the USD
+    // leg. The CAD leg was -152847 at the nominal 0.73; the realized rate
+    // was 1500.00/2093.80, so it is corrected to -150000.
+    expect(out.budgetAmountMinor).toBe(-150000);
+    expect(inn.budgetAmountMinor).toBe(150000);
+  });
+
+  it('leaves Ready to Assign unchanged — the same invariant PR 14 established for same-currency links', async () => {
+    const { app, sessionCookie, budgetId, outId, inId } = await crossCurrencySetup('xfx-rta@example.com');
+    const before = await readyToAssign(app, sessionCookie, budgetId);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${outId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inId }),
+    });
+
+    // Before linking the two rows contributed -152847 and +150000 — a
+    // 2847 discrepancy that was silently sitting in Ready to Assign
+    // because the nominal rate disagreed with reality. Linking makes them
+    // an exact pair, so the pair now nets to zero AND the discrepancy is
+    // gone. That is a real change, not a no-op, and it is the correction:
+    // RTA should not have been carrying the difference between a nominal
+    // rate and what the bank actually paid.
+    const after = await readyToAssign(app, sessionCookie, budgetId);
+    expect(before).toBe(-2847);
+    expect(after).toBe(0);
+  });
+
+  it('refuses two legs pointing the same direction — that is not a transfer', async () => {
+    const { app, sessionCookie, budgetId, cad, inId } = await crossCurrencySetup('xfx-same-sign@example.com');
+    const { body: alsoIn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: cad, date: '2026-08-14', amount: '2093.80' }),
+    });
+
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${inId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: alsoIn.transactionId }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('amounts_do_not_offset');
+  });
+
+  it('still requires an exact offset when both legs share a currency', async () => {
+    // The relaxation is strictly for the cross-currency case; same-currency
+    // matching keeps PR 14's exact rule.
+    const { app, sessionCookie, budgetId, usd } = await crossCurrencySetup('xfx-same-currency-strict@example.com');
+    const other = await createAccount(app, sessionCookie, budgetId, { name: 'BECU', type: 'checking' });
+    const { body: a } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: usd, date: '2026-08-20', amount: '-100.00' }),
+    });
+    const { body: b } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: other, date: '2026-08-20', amount: '99.00' }),
+    });
+
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${a.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: b.transactionId }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('amounts_do_not_offset');
+  });
+
+  it('refuses when neither leg is in the budget currency and the outflow account has no rate', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('xfx-no-rate@example.com');
+    const cad = await createAccount(app, sessionCookie, budgetId, {
+      name: 'CAD acct',
+      type: 'tracking_asset',
+      currencyCode: 'CAD',
+    });
+    const eur = await createAccount(app, sessionCookie, budgetId, {
+      name: 'EUR acct',
+      type: 'tracking_asset',
+      currencyCode: 'EUR',
+    });
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: cad, date: '2026-08-14', amount: '-100.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: eur, date: '2026-08-14', amount: '65.00' }),
+    });
+
+    const { status, body } = await callJson<{ error: string }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inn.transactionId }) },
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('needs_fx_rate_to_link');
+  });
+});
+
 describe('authorization', () => {
   it('403s for a user who is not a budget member', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('txn-owner@example.com');

@@ -1120,6 +1120,47 @@ outflow leg to the card's payment category) is reachable end to end from importe
 alone, rather than only from hand-entered rows.
 
 
+**Cross-currency transfer linking landed** (`src/routes/transactions.ts`), closing the gap
+PR 14 explicitly deferred: `currency_mismatch` was a hard 400, which left the commonest real
+cross-border movement unlinkable. Pay a foreign account from a domestic one and the two legs
+are *different numbers by definition*, so "exact opposite amount" — PR 14's whole safety
+rule — can never be satisfied.
+
+- **The candidate search compares what each leg is WORTH, not what it says.** Same-currency
+  matching keeps the exact-offset rule untouched. Across currencies it requires opposite
+  signs on `budgetAmountMinor` within `CROSS_CURRENCY_TOLERANCE` (10%). Relaxing "a
+  near-miss match on money is a guess" is a deliberate, reasoned exception rather than a
+  softening: across currencies no exact counterpart CAN exist, so the choice is between an
+  approximate suggestion the user confirms and no feature at all. Candidates carry
+  `approximate: true` so the UI labels them rather than presenting them with the same
+  confidence as an exact offset. 10% absorbs a stale account rate plus conversion fees — a
+  real pair in this budget sits 1.9% apart — while staying narrow enough that unrelated
+  amounts don't collide.
+- **The link rewrites both legs to an exact pair, and that is the correctness argument.**
+  PR 14's invariant is that linking is Ready-to-Assign-neutral, which only holds if the two
+  legs' `budgetAmountMinor` are exactly equal and opposite. Across currencies they generally
+  aren't: each was converted independently at its account's NOMINAL rate, while the transfer
+  settled at whatever the bank actually gave. So the budget-currency leg is taken as truth —
+  it needs no conversion, it IS the realized value — and the other leg is set to its
+  negation. Same "derive the effective rate from the two legs" principle the Wise importer
+  has used since PR 7.
+- **This corrects money rather than merely tidying it.** In the real UAT budget, a CAD 2093.80
+  outflow carried `budgetAmountMinor` −152847 (the account's nominal 0.73) against a USD
+  1500.00 inflow. The $28.47 difference was sitting in Ready to Assign — not because anything
+  was miscategorized, but because a nominal rate disagreed with reality and nothing
+  reconciled the two. Linking removes it. A test asserts exactly that transition (−2847 → 0)
+  rather than asserting a no-op, because it genuinely isn't one.
+- **When neither leg is in the budget's currency** (CAD → EUR in a USD budget) there is no
+  realized budget-currency figure to anchor on, so the outflow leg is converted at its own
+  account's rate and mirrored — still exactly equal and opposite, still RTA-neutral, just
+  resting on a nominal rate. With no rate on that account there is nothing honest to use, so
+  it's a `needs_fx_rate_to_link` 400.
+
+Unlink deliberately does NOT restore the pre-link `budgetAmountMinor`: the realized figure is
+better data than the nominal one it replaced, and silently reverting to a worse number on
+unlink would be the surprising behaviour.
+
+
 
 ## Roadmap
 
@@ -1149,8 +1190,9 @@ anything large. `import_batches` tracks a run; `transactions.import_id` makes re
 idempotent. ~~Auto-matching a Splitwise settlement to its bank transaction as a transfer
 would need cross-account amount/date matching.~~ **Landed in PR 14** — suggested matches
 plus manual linking of two already-imported rows (see below). Still to come there: doing it
-automatically at import time rather than on request, and the cross-currency case (PR 14
-requires both legs in the same currency), which is precisely the Phase 5 work below.
+automatically at import time rather than on request. ~~The cross-currency case (PR 14
+requires both legs in the same currency).~~ **Landed** — see the cross-currency linking
+notes above.
 
 **Phase 5 — Full multi-currency.** *Partially landed in PR 15* — a foreign-currency account
 can now be genuinely on-budget, given a per-import exchange rate remembered on the account

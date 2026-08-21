@@ -11,7 +11,7 @@ import {
 } from '../budget/transactions';
 import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
 import { getDb, type Db } from '../db/client';
-import { accounts, categories, payees, transactions } from '../db/schema';
+import { accounts, budgets, categories, payees, transactions } from '../db/schema';
 import { addDays } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import { convertToBudgetMinor, parseAmountToMinor } from '../lib/money';
@@ -414,6 +414,30 @@ transactionsRoute.delete('/:transactionId', requireBudgetMember('editor'), async
 /** How far apart two rows may be dated and still be offered as a match. */
 const TRANSFER_MATCH_WINDOW_DAYS = 5;
 
+/**
+ * How far a CROSS-CURRENCY candidate's budget-currency value may sit from
+ * the source row's before it stops being offered.
+ *
+ * Same-currency matching stays exact — see the candidate query below —
+ * because "a near-miss match on money is a guess" and an exact
+ * counterpart always exists. Across currencies no exact counterpart CAN
+ * exist: the two legs are different amounts by definition, and the only
+ * thing relating them is a rate nobody recorded at the time. The source
+ * row's own budgetAmountMinor is computed from its account's NOMINAL
+ * rate, while the real transfer settled at whatever the bank actually
+ * gave — a real pair in this budget lands 1.9% apart on exactly that
+ * gap. So a band is the only workable rule, and the choice is between an
+ * approximate suggestion the user confirms or no feature at all.
+ *
+ * 10% is wide enough for a stale account rate plus conversion fees, and
+ * narrow enough that unrelated amounts don't collide. Candidates are
+ * flagged `approximate` so the UI can say the match is not exact, and the
+ * link itself corrects both legs to an exact pair regardless (see
+ * POST /link-transfer), so a wrong pick is visible and reversible rather
+ * than silently absorbed.
+ */
+const CROSS_CURRENCY_TOLERANCE = 0.1;
+
 const linkTransferSchema = z.object({ otherTransactionId: z.string().min(1) });
 
 /** The columns both the candidate search and the link validation need. */
@@ -422,6 +446,7 @@ const linkableColumns = {
   accountId: transactions.accountId,
   date: transactions.date,
   amountMinor: transactions.amountMinor,
+  budgetAmountMinor: transactions.budgetAmountMinor,
   currencyCode: transactions.currencyCode,
   categoryId: transactions.categoryId,
   memo: transactions.memo,
@@ -479,6 +504,10 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
   const earliest = addDays(row.date, -TRANSFER_MATCH_WINDOW_DAYS);
   const latest = addDays(row.date, TRANSFER_MATCH_WINDOW_DAYS);
 
+  // Everything linkable in the window, in ANY account and currency. The
+  // amount rule is applied in JS below rather than in SQL because it
+  // differs by currency — exact for a same-currency pair, a tolerance
+  // band across currencies (see CROSS_CURRENCY_TOLERANCE).
   const rows = await db
     .select({ ...linkableColumns, accountName: accounts.name })
     .from(transactions)
@@ -491,19 +520,33 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
         isNull(transactions.parentTransactionId),
         isNull(transactions.categoryId),
         ne(transactions.accountId, row.accountId),
-        eq(transactions.amountMinor, -row.amountMinor),
-        eq(transactions.currencyCode, row.currencyCode),
         gte(transactions.date, earliest),
         lte(transactions.date, latest),
       ),
     )
     .orderBy(asc(transactions.date))
-    .limit(20);
+    .limit(200);
 
   // A split parent has no parentTransactionId of its own, so it survives
   // the query above — filter it out here, where the child lookup lives.
   const candidates = [];
   for (const candidate of rows) {
+    const sameCurrency = candidate.currencyCode === row.currencyCode;
+
+    // Same currency keeps PR 14's exact-opposite rule untouched.
+    if (sameCurrency && candidate.amountMinor !== -row.amountMinor) continue;
+
+    // Across currencies the legs are different numbers by definition, so
+    // compare what they're each WORTH in the budget's currency, and only
+    // within a band. Requires opposite signs — one side out, one side in.
+    if (!sameCurrency) {
+      if (row.budgetAmountMinor === 0 || candidate.budgetAmountMinor === 0) continue;
+      if (Math.sign(candidate.budgetAmountMinor) === Math.sign(row.budgetAmountMinor)) continue;
+      const expected = Math.abs(row.budgetAmountMinor);
+      const drift = Math.abs(Math.abs(candidate.budgetAmountMinor) - expected) / expected;
+      if (drift > CROSS_CURRENCY_TOLERANCE) continue;
+    }
+
     if (await hasSplitChildren(db, candidate.id)) continue;
     candidates.push({
       id: candidate.id,
@@ -511,9 +554,13 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
       accountName: candidate.accountName,
       date: candidate.date,
       amountMinor: candidate.amountMinor,
+      currencyCode: candidate.currencyCode,
       memo: candidate.memo,
       importPayeeRaw: candidate.importPayeeRaw,
+      /** True when the two legs are in different currencies, so the match is a near-miss by nature rather than an exact offset. */
+      approximate: !sameCurrency,
     });
+    if (candidates.length >= 20) break;
   }
 
   return c.json({ candidates });
@@ -548,16 +595,74 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
   }
 
   if (first.accountId === second.accountId) return c.json({ error: 'same_account' }, 400);
-  if (first.currencyCode !== second.currencyCode) return c.json({ error: 'currency_mismatch' }, 400);
-  // Exact opposites. Also rejects a 0/0 pair, which is not a transfer of
-  // anything and would link two unrelated rows on a technicality.
-  if (first.amountMinor !== -second.amountMinor || first.amountMinor === 0) {
-    return c.json({ error: 'amounts_do_not_offset' }, 400);
-  }
 
   const [firstAccount] = await db.select().from(accounts).where(eq(accounts.id, first.accountId)).limit(1);
   const [secondAccount] = await db.select().from(accounts).where(eq(accounts.id, second.accountId)).limit(1);
   if (!firstAccount || !secondAccount) return c.json({ error: 'invalid_account' }, 400);
+
+  const sameCurrency = first.currencyCode === second.currencyCode;
+
+  // Same currency: exact opposites, unchanged from PR 14. Also rejects a
+  // 0/0 pair, which is not a transfer of anything and would link two
+  // unrelated rows on a technicality.
+  if (sameCurrency && (first.amountMinor !== -second.amountMinor || first.amountMinor === 0)) {
+    return c.json({ error: 'amounts_do_not_offset' }, 400);
+  }
+
+  // Cross-currency: the two legs are DIFFERENT numbers by definition, so
+  // "equal and opposite" can only be required of what they're worth, not
+  // of the native amounts. All that's demanded of the natives is that one
+  // is an outflow and the other an inflow.
+  if (!sameCurrency && (first.amountMinor === 0 || second.amountMinor === 0 || Math.sign(first.amountMinor) === Math.sign(second.amountMinor))) {
+    return c.json({ error: 'amounts_do_not_offset' }, 400);
+  }
+
+  // What the movement was actually WORTH, in the budget's currency.
+  //
+  // Linking must stay Ready-to-Assign-neutral — PR 14's whole invariant —
+  // and that only holds if the two legs' budgetAmountMinor are exactly
+  // equal and opposite. Across currencies they generally aren't: each was
+  // converted independently at its own account's NOMINAL rate, while the
+  // transfer settled at whatever the bank actually gave. So one side is
+  // chosen as the truth and the other is set to its negation.
+  //
+  // The budget-currency leg wins when there is one, because it needs no
+  // conversion at all — it IS the realized value, which beats any stored
+  // rate. That is the same "derive the effective rate from the two legs"
+  // principle the Wise importer already uses (see src/routes/imports.ts),
+  // and it corrects the other leg from nominal to realized in the process.
+  let firstBudgetAmountMinor = first.budgetAmountMinor;
+  let secondBudgetAmountMinor = second.budgetAmountMinor;
+  if (!sameCurrency) {
+    const [budget] = await db
+      .select({ currencyCode: budgets.currencyCode })
+      .from(budgets)
+      .where(eq(budgets.id, budgetId))
+      .limit(1);
+    if (!budget) return c.json({ error: 'not_found' }, 404);
+
+    if (first.currencyCode === budget.currencyCode) {
+      secondBudgetAmountMinor = -firstBudgetAmountMinor;
+    } else if (second.currencyCode === budget.currencyCode) {
+      firstBudgetAmountMinor = -secondBudgetAmountMinor;
+    } else {
+      // Neither leg is in the budget's currency (CAD -> EUR in a USD
+      // budget), so nothing here is a realized budget-currency figure.
+      // Fall back to converting the OUTFLOW leg at its account's rate and
+      // mirroring it — still exactly equal and opposite, still
+      // RTA-neutral, just resting on a nominal rate rather than a
+      // realized one. Without a rate there is nothing honest to use.
+      const firstIsOutflow = first.amountMinor < 0;
+      const outflowAccount = firstIsOutflow ? firstAccount : secondAccount;
+      const outflow = firstIsOutflow ? first : second;
+      if (outflowAccount.fxRateMicros === null) {
+        return c.json({ error: 'needs_fx_rate_to_link' }, 400);
+      }
+      const outflowValue = convertToBudgetMinor(outflow.amountMinor, outflowAccount.fxRateMicros);
+      firstBudgetAmountMinor = firstIsOutflow ? outflowValue : -outflowValue;
+      secondBudgetAmountMinor = -firstBudgetAmountMinor;
+    }
+  }
 
   const now = Date.now();
   // Each leg's payee names the OTHER account, matching what the create
@@ -568,11 +673,23 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
 
   await db
     .update(transactions)
-    .set({ transferTransactionId: second.id, transferAccountId: second.accountId, payeeId: firstPayeeId, updatedAt: now })
+    .set({
+      transferTransactionId: second.id,
+      transferAccountId: second.accountId,
+      payeeId: firstPayeeId,
+      budgetAmountMinor: firstBudgetAmountMinor,
+      updatedAt: now,
+    })
     .where(eq(transactions.id, first.id));
   await db
     .update(transactions)
-    .set({ transferTransactionId: first.id, transferAccountId: first.accountId, payeeId: secondPayeeId, updatedAt: now })
+    .set({
+      transferTransactionId: first.id,
+      transferAccountId: first.accountId,
+      payeeId: secondPayeeId,
+      budgetAmountMinor: secondBudgetAmountMinor,
+      updatedAt: now,
+    })
     .where(eq(transactions.id, second.id));
 
   return c.json({ status: 'ok' });

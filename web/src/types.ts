@@ -183,8 +183,17 @@ export interface TransferCandidate {
   accountName: string;
   date: string;
   amountMinor: number;
+  currencyCode: string;
   memo: string | null;
   importPayeeRaw: string | null;
+  /**
+   * True when this leg is in a different currency from the row being
+   * linked. Same-currency matches are exact offsets; cross-currency ones
+   * can only ever be close, so they're surfaced as such rather than
+   * presented with the same confidence. See src/routes/transactions.ts's
+   * CROSS_CURRENCY_TOLERANCE.
+   */
+  approximate: boolean;
 }
 
 /** One past import run — GET .../imports. What DELETE .../imports/:batchId undoes. */

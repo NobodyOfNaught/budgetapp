@@ -220,7 +220,7 @@ export function Register({
                         <span style={{ color: '#666' }}>Looking for a matching transaction…</span>
                       ) : candidates.length === 0 ? (
                         <span style={{ color: '#666' }}>
-                          No match found — nothing in another account has the opposite amount within a few days.
+                          No match found — nothing in another account offsets this within a few days.
                         </span>
                       ) : (
                         <>
@@ -228,10 +228,24 @@ export function Register({
                           {candidates.map((cand) => (
                             <div key={cand.id} style={{ marginBottom: '0.25rem' }}>
                               <button onClick={() => handleLink(t.id, cand.id)}>Link</button>{' '}
-                              <strong>{cand.accountName}</strong> · {cand.date} · {formatMinor(cand.amountMinor)}
+                              <strong>{cand.accountName}</strong> · {cand.date} ·{' '}
+                              {formatMinor(cand.amountMinor)}
+                              {cand.approximate && ` ${cand.currencyCode}`}
                               {cand.importPayeeRaw && <span style={{ color: '#666' }}> · {cand.importPayeeRaw}</span>}
+                              {cand.approximate && (
+                                <span style={{ color: '#a56a00' }}>
+                                  {' '}
+                                  · currency conversion — amounts won&apos;t match exactly
+                                </span>
+                              )}
                             </div>
                           ))}
+                          {candidates.some((c) => c.approximate) && (
+                            <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+                              Linking a conversion uses the amount that actually arrived as the transfer&apos;s value,
+                              correcting the account&apos;s exchange rate for this transaction.
+                            </p>
+                          )}
                         </>
                       )}
                       {linkError && <p style={{ color: '#c0392b', margin: '0.25rem 0 0' }}>{linkError}</p>}

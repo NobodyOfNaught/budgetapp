@@ -1087,6 +1087,39 @@ different client, a raw fetch), not a fix for an observed break. Cheap, and a fi
 artifact rather than any one bank's quirk, so it belongs in the reader.
 
 
+**Simplii import landed as the eighth provider** (`src/import/simplii.ts`), a second CAD
+chequing account, driven by a real 20-row export. The plainest format yet, and almost
+entirely assembled from machinery that already existed: BECU's split-column sign rule, the
+US-style `M/D/YYYY` converter in `src/import/dates.ts`, and the content-derived `import_id`
+with an occurrence counter that every ID-less bank export needs. Three things worth knowing:
+
+- **The date is `MM/DD/YYYY`, not `DD/MM/YYYY`, despite Simplii being a Canadian bank** —
+  stated outright because the Canadian convention is the other way round and this is the
+  single assumption the whole import rests on. Confirmed from the real file rather than
+  assumed: day components run to 31, which cannot be a month. Read the wrong way round,
+  `03/17/2026` would be rejected outright while `04/01/2026` silently landed in January —
+  half the file quietly misfiled, no error anywhere. A test pins a day > 12 for exactly
+  that reason.
+- **The header is space-padded** — the literal line is
+  `Date, Transaction Details, Funds Out, Funds In `. Free to handle, since
+  `parseCsvRecords` trims header names, but pinned by a test: a parser reading columns
+  positionally would get `undefined` for every lookup and skip the entire file.
+- **No Balance column**, unlike AACU's and Vancity's chequing exports, so there is no
+  running total to reconcile against. The suite's ground truth is instead the hand-summed
+  column totals taken from the raw file before the parser existed — 6000.00 out across 10
+  rows, 5000.00 in across 10, net −1000.00 — and verified against the untouched file by
+  embedding its exact bytes.
+
+**A real cross-account finding this surfaced.** All ten `INTERNET BILL PAYMENT MASTERCARD
+NEO FINANCIAL` rows are payments to the Neo card already imported here. Four of them fall in
+the window the Neo export also covers, and every one matches a Neo `Payment Received` row of
+the same amount 1–3 days later — comfortably inside `TRANSFER_MATCH_WINDOW_DAYS` (5), so
+PR 14's transfer-candidate search will offer all four. That makes this the first budget in
+which the credit-card payment shape documented above (link the pair, then categorize the
+outflow leg to the card's payment category) is reachable end to end from imported data
+alone, rather than only from hand-entered rows.
+
+
 
 ## Roadmap
 
@@ -1104,7 +1137,7 @@ see each other's edits.
 
 **Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, PR 13, and PR 15* —
 per-provider CSV parsers (Wise, BECU, Splitwise, AACU, Neo Mastercard, Vancity chequing,
-Vancity Visa),
+Vancity Visa, Simplii),
 an approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
 heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
 as a net-position clearing account with per-import member selection (see PR 10's notes

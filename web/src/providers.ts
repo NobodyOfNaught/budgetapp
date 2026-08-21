@@ -15,4 +15,5 @@ export const IMPORT_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: 'neo', label: 'Neo Mastercard' },
   { value: 'vancity', label: 'Vancity (chequing)' },
   { value: 'vancity_visa', label: 'Vancity Visa' },
+  { value: 'simplii', label: 'Simplii' },
 ];

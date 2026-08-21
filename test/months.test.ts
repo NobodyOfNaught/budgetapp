@@ -158,7 +158,7 @@ describe('PUT .../months/:month/assignments', () => {
     expect(body.readyToAssign).toBe(15000); // 20000 - 5000 total assigned either way, unaffected by the move
   });
 
-  it('assigning to a credit account’s payment category works (covering a starting-balance-style deficit)', async () => {
+  it('a card’s payment category maintains itself — assigning to it just moves money out of Ready to Assign', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('months-payment-cat@example.com');
     await createAccount(app, sessionCookie, budgetId, {
       name: 'Visa',
@@ -176,14 +176,25 @@ describe('PUT .../months/:month/assignments', () => {
     );
     const paymentCat = cats.groups.flatMap((g) => g.categories).find((c) => c.kind === 'credit_card_payment')!;
 
+    // This case used to read -40.00 here and 0 after assigning 40.00 —
+    // "covering" the deficit was how you funded a card. Under the unified
+    // model the earmark is created automatically by the charge itself, so
+    // the category already reads +40.00 (that much owed and earmarked)
+    // and the shortfall lives in Ready to Assign instead.
     const { body: before } = await callJson<MonthView>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03`);
-    expect(before.categories[paymentCat.id]?.available).toBe(-4000);
+    expect(before.categories[paymentCat.id]?.available).toBe(4000);
+    expect(before.readyToAssign).toBe(-4000);
 
+    // Assigning to it is still permitted and still balances — it simply
+    // moves money from Ready to Assign into the category, over-earmarking
+    // a card whose debt is already covered. Nothing breaks; it just isn't
+    // how you fund a card any more.
     const { body: after } = await callJson<MonthView>(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03/assignments`, {
       method: 'PUT',
       body: JSON.stringify({ assignments: [{ categoryId: paymentCat.id, assigned: '40.00' }] }),
     });
-    expect(after.categories[paymentCat.id]?.available).toBe(0); // covered
+    expect(after.categories[paymentCat.id]?.available).toBe(8000);
+    expect(after.readyToAssign).toBe(-8000);
   });
 
   // PR 15: proves ledger.ts needed zero changes to support a budgetable
@@ -519,23 +530,23 @@ describe('what actually backs Ready to Assign', () => {
     expect(view.cashOnHandMinor).toBe(50000); // untouched — nothing left chequing
     expect(view.creditDebtMinor).toBe(-7500);
 
-    // cash + debt = RTA + sum(available) + categorized card spending
-    expect(view.cashOnHandMinor + view.creditDebtMinor).toBe(view.readyToAssign + sumAvailable + -7500);
-    // Note what that means here: the debt IS the categorized spending, so
-    // the two extra terms cancel and the cash identity still holds. A
-    // card purchase alone does not make Ready to Assign overstate cash —
-    // the next case is what does.
+    // One identity now, with no correction terms: what you hold in cash is
+    // what is assigned plus what is not. The four-term version this case
+    // used to assert (cash + debt = RTA + available + categorized card
+    // spending) was a symptom of the two sign conventions, and is gone.
     expect(view.readyToAssign + sumAvailable).toBe(view.cashOnHandMinor);
   });
 
-  it('UNcategorized card debt is what pushes Ready to Assign above the cash backing it', async () => {
-    // The real-world shape: a card imported with a balance already on it.
-    // That row is uncategorized on a credit account, so the ledger sends
-    // it straight into the payment category as debt nobody has budgeted
-    // for — it never passes through Ready to Assign, which therefore keeps
-    // reading as though the money were free. This is the case worth
-    // showing on screen, because the headline number looks healthier than
-    // the budget is and nothing about it says so.
+  it('UNcategorized card debt now comes straight off Ready to Assign', async () => {
+    // The case this whole model change exists for. A card imported with a
+    // balance already on it used to leave Ready to Assign reading the
+    // full 500 — the debt went into the payment category as raw debt and
+    // never passed through here, so the headline number looked healthier
+    // than the budget was and nothing about it said so.
+    //
+    // Now the charge earmarks +300 against the card AND takes 300 off
+    // Ready to Assign, so the pair nets to zero and the shortfall is
+    // visible where people actually look.
     const { app, sessionCookie, budgetId } = await signInNewUser('backing-card-debt@example.com');
     const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
     const card = await createAccount(app, sessionCookie, budgetId, { name: 'Visa', type: 'credit_card' });
@@ -555,15 +566,10 @@ describe('what actually backs Ready to Assign', () => {
 
     expect(view.cashOnHandMinor).toBe(50000);
     expect(view.creditDebtMinor).toBe(-30000);
-    // Ready to Assign still reads the full 500 — the card debt went to the
-    // payment category, not through here.
-    expect(view.readyToAssign).toBe(50000);
-    expect(sumAvailable).toBe(-30000);
-    // So RTA alone matches cash, but only because the 300 of debt is
-    // parked in a category showing -300. Assigning all 500 would leave
-    // nothing for a card that needs 300.
-    expect(view.readyToAssign + sumAvailable).toBe(20000);
-    expect(view.readyToAssign).toBeGreaterThan(view.readyToAssign + sumAvailable);
+    expect(view.readyToAssign).toBe(20000); // 500 income less 300 of unbudgeted card debt
+    expect(sumAvailable).toBe(30000); // earmarked against the card
+    // And the identity holds, which under the old rules it did not.
+    expect(view.readyToAssign + sumAvailable).toBe(view.cashOnHandMinor);
   });
 
   it('reports balances as at the END of the month being viewed, not today', async () => {

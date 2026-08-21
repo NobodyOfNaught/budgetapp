@@ -124,8 +124,20 @@ describe('cash overspending hits next month’s Ready to Assign', () => {
   });
 });
 
-describe('credit overspending stays negative', () => {
-  it('does not touch Ready to Assign, unlike cash overspending', () => {
+describe('uncategorized card spending draws on Ready to Assign', () => {
+  it('earmarks the charge and takes it out of Ready to Assign, and both persist', () => {
+    // This case previously asserted the opposite — payment -50.00 and
+    // Ready to Assign untouched — on the reasoning that card debt must
+    // not "leak into" Ready to Assign. The concern was sound but the
+    // remedy put two opposite sign conventions in one category: a
+    // categorized purchase earmarked POSITIVE while raw debt like this
+    // one went in NEGATIVE, and a card payment then had to drain one and
+    // not the other with no way to tell them apart.
+    //
+    // Doubling instead leaks nothing: the +50.00 earmark is matched by
+    // -50.00 off Ready to Assign, so the pair nets to zero. What changed
+    // is only WHERE the shortfall shows — Ready to Assign going negative,
+    // which is the honest reading of owing money you never budgeted for.
     const card = account('card', 'credit_card');
     const payment = category('payment', 'credit_card_payment', 'card');
     const result = computeLedger({
@@ -139,12 +151,17 @@ describe('credit overspending stays negative', () => {
     });
 
     const month1 = result.months[0]!;
-    expect(month1.categories.payment?.available).toBe(-5000);
-    expect(month1.readyToAssign).toBe(0);
+    expect(month1.categories.payment?.available).toBe(5000);
+    expect(month1.readyToAssign).toBe(-5000);
+    expect(month1.unbudgetedCardSpending).toBe(-5000);
+    // Not income, and this is load-bearing: incomeThisMonth is the income
+    // line of the income-vs-expense report, so card debt must never reach it.
+    expect(month1.incomeThisMonth).toBe(0);
 
     const month2 = result.months[1]!;
-    expect(month2.categories.payment?.available).toBe(-5000); // still negative, unchanged
-    expect(month2.readyToAssign).toBe(0); // untouched — this is the whole point
+    expect(month2.categories.payment?.available).toBe(5000); // carried, unchanged
+    expect(month2.readyToAssign).toBe(-5000); // carried, not clawed back a second time
+    expect(month2.unbudgetedCardSpending).toBe(0); // the charge belongs to month 1 only
   });
 });
 
@@ -359,7 +376,14 @@ describe('starting balances', () => {
     expect(result.months[0]?.readyToAssign).toBe(50000);
   });
 
-  it('a credit account’s starting balance is negative available on its payment category, not phantom income', () => {
+  it('a credit account’s starting balance earmarks the debt and takes it off Ready to Assign', () => {
+    // Was: payment -100.00 and readyToAssign 0, "must NOT leak into RTA".
+    // Now the debt reaches Ready to Assign deliberately — see the
+    // uncategorized-card-spending suite above for why. Nothing is
+    // conjured: +100 earmarked against -100 assignable is a wash, and
+    // starting a budget owing $100 genuinely does mean $100 less to hand
+    // out. incomeThisMonth stays 0 either way, which was always the real
+    // "phantom income" guarantee.
     const card = account('card', 'credit_card');
     const payment = category('payment', 'credit_card_payment', 'card');
     const result = computeLedger({
@@ -369,9 +393,9 @@ describe('starting balances', () => {
       transactions: [txn('card', M1, -100)], // you already owed $100 before this budget existed
       throughMonth: M1,
     });
-    expect(result.months[0]?.categories.payment?.available).toBe(-10000);
-    expect(result.months[0]?.readyToAssign).toBe(0); // must NOT leak into RTA
-    expect(result.months[0]?.incomeThisMonth).toBe(0);
+    expect(result.months[0]?.categories.payment?.available).toBe(10000);
+    expect(result.months[0]?.readyToAssign).toBe(-10000);
+    expect(result.months[0]?.incomeThisMonth).toBe(0); // never income
   });
 });
 
@@ -384,6 +408,154 @@ describe('edge cases', () => {
       transactions: [],
       throughMonth: M3,
     });
-    expect(result.months).toEqual([{ month: M3, readyToAssign: 0, incomeThisMonth: 0, categories: {} }]);
+    expect(result.months).toEqual([
+      { month: M3, readyToAssign: 0, incomeThisMonth: 0, unbudgetedCardSpending: 0, categories: {} },
+    ]);
+  });
+});
+
+describe('the identity that holds under the unified card model', () => {
+  // cash = readyToAssign + sum(available), for EVERY shape a credit card
+  // can take. This is what the model change was for: under the old rules
+  // the identity held for a card carrying only categorized purchases and
+  // broke for one carrying raw debt, with no single treatment of a card
+  // payment able to serve both.
+  //
+  // Every case below is a card carrying BOTH kinds at once, which is the
+  // combination that was unfixable before and the shape a real imported
+  // card actually has.
+  function identity(result: ReturnType<typeof computeLedger>, cashMinor: number) {
+    const month = result.months[result.months.length - 1]!;
+    const sumAvailable = Object.values(month.categories).reduce((s, c) => s + c.available, 0);
+    return { cash: cashMinor, lhs: month.readyToAssign + sumAvailable, month };
+  }
+
+  const checking = account('checking', 'checking');
+  const card = account('card', 'credit_card');
+  const groceries = category('groceries');
+  const payment = category('payment', 'credit_card_payment', 'card');
+
+  it('holds for raw debt plus a categorized purchase, unpaid', () => {
+    const result = computeLedger({
+      accounts: [checking, card],
+      categories: [groceries, payment],
+      categoryMonths: [assign('groceries', M1, 50)],
+      transactions: [
+        txn('checking', M1, 500), // income
+        txn('card', M1, -300), // pre-budget debt, uncategorized
+        txn('card', M1, -50, { categoryId: 'groceries' }), // a real purchase
+      ],
+      throughMonth: M1,
+    });
+    const { cash, lhs, month } = identity(result, 50000);
+    expect(lhs).toBe(cash);
+    // 350 owed on the card, all of it earmarked.
+    expect(month.categories.payment?.available).toBe(35000);
+    // 500 income - 50 assigned - 300 unbudgeted card debt.
+    expect(month.readyToAssign).toBe(15000);
+  });
+
+  it('holds once the card is paid in full, with the paying leg categorized', () => {
+    const result = computeLedger({
+      accounts: [checking, card],
+      categories: [groceries, payment],
+      categoryMonths: [assign('groceries', M1, 50)],
+      transactions: [
+        txn('checking', M1, 500),
+        txn('card', M1, -300),
+        txn('card', M1, -50, { categoryId: 'groceries' }),
+        ...transferPair(
+          { accountId: 'checking', date: M1, dollars: -350, categoryId: 'payment' },
+          { accountId: 'card', date: M1, dollars: 350 },
+        ),
+      ],
+      throughMonth: M1,
+    });
+    const { cash, lhs, month } = identity(result, 15000); // 500 in, 350 paid out
+    expect(lhs).toBe(cash);
+    // Card at zero, so nothing left earmarked — the number that read
+    // -600.00 under the old rules for this exact shape.
+    expect(month.categories.payment?.available).toBe(0);
+    expect(month.readyToAssign).toBe(15000);
+  });
+
+  it('holds on a PARTIAL payment, the case with no correct answer before', () => {
+    const result = computeLedger({
+      accounts: [checking, card],
+      categories: [groceries, payment],
+      categoryMonths: [assign('groceries', M1, 50)],
+      transactions: [
+        txn('checking', M1, 500),
+        txn('card', M1, -300),
+        txn('card', M1, -50, { categoryId: 'groceries' }),
+        ...transferPair(
+          { accountId: 'checking', date: M1, dollars: -100, categoryId: 'payment' },
+          { accountId: 'card', date: M1, dollars: 100 },
+        ),
+      ],
+      throughMonth: M1,
+    });
+    const { cash, lhs, month } = identity(result, 40000);
+    expect(lhs).toBe(cash);
+    // 250 still owed, 250 still earmarked — the payment category tracks
+    // the card whatever mix of raw debt and purchases produced it.
+    expect(month.categories.payment?.available).toBe(25000);
+  });
+
+  it('holds across a month boundary, with the payment in the later month', () => {
+    const result = computeLedger({
+      accounts: [checking, card],
+      categories: [groceries, payment],
+      categoryMonths: [assign('groceries', M1, 50)],
+      transactions: [
+        txn('checking', M1, 500),
+        txn('card', M1, -300),
+        txn('card', M1, -50, { categoryId: 'groceries' }),
+        ...transferPair(
+          { accountId: 'checking', date: M2, dollars: -350, categoryId: 'payment' },
+          { accountId: 'card', date: M2, dollars: 350 },
+        ),
+      ],
+      throughMonth: M2,
+    });
+    const { cash, lhs, month } = identity(result, 15000);
+    expect(lhs).toBe(cash);
+    expect(month.categories.payment?.available).toBe(0);
+  });
+
+  it('holds for an overpaid card, where the payment category goes negative', () => {
+    // The one case where a payment category legitimately reads negative
+    // under the new model: more sent than was owed. It must NOT be reset
+    // as cash overspending at the month boundary.
+    const result = computeLedger({
+      accounts: [checking, card],
+      categories: [groceries, payment],
+      categoryMonths: [],
+      transactions: [
+        txn('checking', M1, 500),
+        txn('card', M1, -100),
+        ...transferPair(
+          { accountId: 'checking', date: M1, dollars: -150, categoryId: 'payment' },
+          { accountId: 'card', date: M1, dollars: 150 },
+        ),
+      ],
+      throughMonth: M2,
+    });
+    const { cash, lhs, month } = identity(result, 35000);
+    expect(lhs).toBe(cash);
+    expect(month.categories.payment?.available).toBe(-5000); // 50 credit on the card
+    expect(month.readyToAssign).toBe(40000); // 500 income - 100 card debt, NOT clawed back again
+  });
+
+  it('is unaffected by a cash-only budget — the baseline still holds', () => {
+    const result = computeLedger({
+      accounts: [checking],
+      categories: [groceries],
+      categoryMonths: [assign('groceries', M1, 200)],
+      transactions: [txn('checking', M1, 500), txn('checking', M1, -75, { categoryId: 'groceries' })],
+      throughMonth: M1,
+    });
+    const { cash, lhs } = identity(result, 42500);
+    expect(lhs).toBe(cash);
   });
 });

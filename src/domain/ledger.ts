@@ -58,7 +58,7 @@ export function computeLedger(input: LedgerInput): LedgerResult {
   const results: MonthResult[] = [];
 
   for (const month of months) {
-    const { activityByCategory, incomeThisMonth } = accumulateMonth(
+    const { activityByCategory, incomeThisMonth, unbudgetedCardSpending } = accumulateMonth(
       rowsByMonth.get(month) ?? [],
       accountsById,
       categoriesById,
@@ -80,9 +80,14 @@ export function computeLedger(input: LedgerInput): LedgerResult {
       if (prior >= 0) {
         carryover = prior;
       } else if (category.kind === 'credit_card_payment') {
-        // Debt taken on, not cash overspent — stays negative. Nothing
-        // claws back next month's real money for this; the whole point of
-        // the payment category is to represent an honest, ongoing balance.
+        // A payment category carries what is owed on its card, and every
+        // charge now earmarks INTO it (see accumulateMonth), so it is
+        // normally positive and this branch rarely fires. When it does,
+        // negative means the card was OVERPAID — more money sent than was
+        // owed — which is not cash overspending and must not be clawed
+        // back from next month's Ready to Assign. Resetting it would also
+        // break the identity the category rests on:
+        // available = -(card balance) + assigned.
         carryover = prior;
       } else {
         // Spent cash you hadn't budgeted for. The shortfall must come from
@@ -98,8 +103,13 @@ export function computeLedger(input: LedgerInput): LedgerResult {
       prevAvailable.set(category.id, available);
     }
 
-    readyToAssign = readyToAssign + incomeThisMonth - totalAssigned - cashOverspendingRealized;
-    results.push({ month, readyToAssign, incomeThisMonth, categories });
+    // unbudgetedCardSpending is negative for a charge: spending on a card
+    // without a category draws on Ready to Assign, exactly as the same
+    // spending would from a cash account. It is added rather than
+    // subtracted because it already carries the transaction's own sign.
+    readyToAssign =
+      readyToAssign + incomeThisMonth + unbudgetedCardSpending - totalAssigned - cashOverspendingRealized;
+    results.push({ month, readyToAssign, incomeThisMonth, unbudgetedCardSpending, categories });
   }
 
   return { months: results };
@@ -146,12 +156,17 @@ function accumulateMonth(
   accountsById: Map<string, AccountRow>,
   categoriesById: Map<string, CategoryRow>,
   paymentCategoryByAccountId: Map<string, string>,
-): { activityByCategory: Map<string, number>; incomeThisMonth: number } {
+): { activityByCategory: Map<string, number>; incomeThisMonth: number; unbudgetedCardSpending: number } {
   const activityByCategory = new Map<string, number>();
   const add = (categoryId: string, amount: number) =>
     activityByCategory.set(categoryId, (activityByCategory.get(categoryId) ?? 0) + amount);
 
   let incomeThisMonth = 0;
+  // Kept apart from incomeThisMonth deliberately. Both fold into Ready to
+  // Assign, but incomeThisMonth is ALSO the income line of the
+  // income-vs-expense report (src/routes/reports.ts) — folding card
+  // spending into it would render card debt as negative income.
+  let unbudgetedCardSpending = 0;
 
   for (const row of rows) {
     const account = accountsById.get(row.accountId);
@@ -223,21 +238,42 @@ function accumulateMonth(
     }
 
     if (isCredit) {
-      // Uncategorized card activity (most commonly a starting balance —
-      // debt that existed before this budget did) goes DIRECTLY into the
-      // payment category, undoubled and unflipped — i.e. treated exactly
-      // as if it had been categorized straight to Payment. A -$100
-      // starting balance therefore makes the payment category read -$100,
-      // prompting the user to assign real money to cover it — never
-      // +$100, which would conjure spendable-looking money for a debt
-      // nothing has actually budgeted for yet.
+      // Uncategorized card activity — a charge nobody has filed yet, or
+      // most often a starting balance, debt that existed before this
+      // budget did. It takes the SAME shape as the categorized purchase
+      // above: the amount lands in a bucket, and the card's payment
+      // category gets the opposite.
+      //
+      // The only difference is which bucket. A categorized purchase draws
+      // on its spending category; an uncategorized one has no category to
+      // draw on, so it draws on Ready to Assign — which is precisely what
+      // "uncategorized" means everywhere else in this function.
+      //
+      // This branch used to add the amount to the payment category
+      // UNDOUBLED, on the reasoning that a -$100 starting balance should
+      // read -$100 there ("prompting the user to assign real money to
+      // cover it — never +$100, which would conjure spendable-looking
+      // money"). The concern was right; the remedy put two opposite sign
+      // conventions in one category. A purchase adds a POSITIVE earmark,
+      // raw debt added NEGATIVE debt, and a card payment has to drain the
+      // first while leaving the second alone — with nothing in the payment
+      // itself to say which it is paying. That is unresolvable, and it is
+      // why sum(on-budget balances) never quite equalled
+      // readyToAssign + sum(available).
+      //
+      // Doubling instead conjures nothing: the +$100 earmark is matched by
+      // -$100 off Ready to Assign, so the pair nets to zero and the
+      // shortfall shows up as Ready to Assign going negative — which is
+      // the honest reading of owing money you never budgeted for. See
+      // docs/plan.md's PR 18 notes for the worked comparison.
+      unbudgetedCardSpending += row.budgetAmountMinor;
       const paymentCategoryId = paymentCategoryByAccountId.get(account.id);
-      if (paymentCategoryId) add(paymentCategoryId, row.budgetAmountMinor);
-      // No payment category exists for this account yet: the contribution
-      // is silently dropped. The API layer is responsible for every
-      // credit account always having one; this pure function degrades
-      // gracefully rather than throwing on a data gap that shouldn't occur
-      // in practice.
+      if (paymentCategoryId) add(paymentCategoryId, -row.budgetAmountMinor);
+      // No payment category exists for this account yet: the earmark half
+      // is silently dropped. The API layer is responsible for every credit
+      // account always having one; this pure function degrades gracefully
+      // rather than throwing on a data gap that shouldn't occur in
+      // practice.
     } else {
       // Uncategorized inflow/outflow on an ordinary on-budget account is
       // money moving straight to/from Ready to Assign — this is what makes
@@ -247,5 +283,5 @@ function accumulateMonth(
     }
   }
 
-  return { activityByCategory, incomeThisMonth };
+  return { activityByCategory, incomeThisMonth, unbudgetedCardSpending };
 }

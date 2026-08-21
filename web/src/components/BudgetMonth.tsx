@@ -55,44 +55,42 @@ function monthLabel(month: string): string {
 /**
  * What actually backs Ready to Assign.
  *
- * Ready to Assign is "money not yet given a job", which is NOT the same as
- * "cash you have" the moment a credit card is involved — a card purchase
- * moves money twice (the spending category falls, the card's payment
- * category rises) while the card balance falls, so Ready to Assign can sit
- * well above the cash on hand with the difference being debt nobody has
- * budgeted for. That gap is invisible from the number alone, and it is
- * exactly the thing that makes the headline figure look healthier than the
- * budget is, so it is spelled out rather than left to be worked out.
+ * Under the unified card model (see src/domain/ledger.ts) the books close
+ * exactly: cash on hand = Ready to Assign + every category's available.
+ * There are no correction terms, so this can state the relationship rather
+ * than hedge about it.
+ *
+ * What still needs saying is WHY Ready to Assign is negative when it is —
+ * usually card debt that was never budgeted for, which now comes straight
+ * off the top instead of hiding in a payment category.
  */
 function Reconciliation({ view, categoryGroups }: { view: MonthView; categoryGroups: CategoryGroup[] }) {
   const paymentCategoryIds = new Set(
     categoryGroups.flatMap((g) => g.categories.filter((c) => c.kind === 'credit_card_payment').map((c) => c.id)),
   );
 
-  let paymentShortfall = 0;
+  let earmarkedForCards = 0;
   let overspent = 0;
   for (const [id, amounts] of Object.entries(view.categories)) {
-    if (amounts.available >= 0) continue;
-    if (paymentCategoryIds.has(id)) paymentShortfall += amounts.available;
-    else overspent += amounts.available;
+    if (paymentCategoryIds.has(id)) earmarkedForCards += amounts.available;
+    else if (amounts.available < 0) overspent += amounts.available;
   }
-
-  const uncoveredByCash = view.readyToAssign - view.cashOnHandMinor;
 
   return (
     <div style={{ fontSize: '0.9em', color: '#666', margin: '0 0 0.75rem' }}>
       <span>Cash in budget accounts: {formatMinor(view.cashOnHandMinor)}</span>
       {view.creditDebtMinor !== 0 && <span> · Card balances: {formatMinor(view.creditDebtMinor)}</span>}
-      {paymentShortfall < 0 && (
-        <span style={{ color: '#c0392b' }}> · Card debt not yet budgeted for: {formatMinor(paymentShortfall)}</span>
-      )}
+      {earmarkedForCards !== 0 && <span> · Earmarked to pay cards: {formatMinor(earmarkedForCards)}</span>}
       {overspent < 0 && (
         <span style={{ color: '#c0392b' }}> · Overspent this month: {formatMinor(overspent)}</span>
       )}
-      {uncoveredByCash > 0 && (
-        <div style={{ color: '#a56a00', marginTop: '0.25rem' }}>
-          Ready to Assign is {formatMinor(uncoveredByCash)} more than the cash in your budget accounts — assigning all
-          of it would spend money the accounts don&apos;t hold.
+      {view.readyToAssign < 0 && (
+        <div style={{ color: '#c0392b', marginTop: '0.25rem' }}>
+          Ready to Assign is below zero — your categories hold more than your accounts do.
+          {view.unbudgetedCardSpending < 0 && (
+            <> {formatMinor(-view.unbudgetedCardSpending)} of that is card spending this month with no category.</>
+          )}{' '}
+          Cover it by assigning less, or by categorizing card charges so they draw on a category instead.
         </div>
       )}
     </div>

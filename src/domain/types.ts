@@ -82,6 +82,11 @@ export interface MonthResult {
    * reusing this rather than a second computation of "which rows count as
    * income" is the whole point of exposing it. */
   incomeThisMonth: number;
+  /** Uncategorized spending on on-budget credit accounts this month — negative for a
+   * charge. Folds into readyToAssign alongside incomeThisMonth but is kept separate from
+   * it because incomeThisMonth doubles as the income-vs-expense report's income line, and
+   * card debt is not income. Exposed so the UI can say WHY Ready to Assign is negative. */
+  unbudgetedCardSpending: number;
   categories: Record<string, CategoryMonthResult>;
 }
 

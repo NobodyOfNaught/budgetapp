@@ -142,14 +142,20 @@ export interface MonthView {
   categories: Record<string, CategoryMonthAmounts>;
   targets: Record<string, TargetResultView>;
   /**
-   * Balances at the END of this month, in the budget's currency. Ready to
-   * Assign is money without a job, which is not the same as money you
-   * have once a credit card is in play — see the doc comment on
-   * src/routes/months.ts's MonthView for the identity and why the two
-   * legitimately differ.
+   * Balances at the END of this month, in the budget's currency. Under the
+   * unified card model these close exactly:
+   * `cashOnHandMinor === readyToAssign + sum(category available)`. See the
+   * doc comment on src/routes/months.ts's MonthView.
    */
   cashOnHandMinor: number;
   creditDebtMinor: number;
+  /**
+   * Uncategorized spending on credit accounts this month — negative for a
+   * charge. It comes off Ready to Assign (and earmarks the same amount
+   * against the card), so it's what explains a negative Ready to Assign.
+   * Kept apart from income: see src/domain/types.ts's MonthResult.
+   */
+  unbudgetedCardSpending: number;
 }
 
 /** GET/PUT /budgets/:id/targets(/:categoryId) — the raw stored target, decimal amount like everywhere else at the API boundary. */

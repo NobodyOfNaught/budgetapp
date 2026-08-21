@@ -26,22 +26,17 @@ interface MonthView extends MonthResult {
    * currency, so Ready to Assign can be read against the money that
    * actually backs it.
    *
-   * Worth stating why these aren't equal and don't have to be. In a
-   * cash-only budget the identity is exact:
+   * Under the unified card model (src/domain/ledger.ts) the identity is
+   * exact, with no correction terms:
    *
    *   cashOnHand = readyToAssign + sum(category available)
    *
-   * Credit cards break it by design. A card purchase moves money twice —
-   * the spending category falls and the card's payment category rises, so
-   * `sum(available)` is unchanged — while the card's balance falls. The
-   * general form is therefore
-   *
-   *   cashOnHand + creditDebt = readyToAssign + sum(available)
-   *                             + sum(categorized credit-card spending)
-   *
-   * which is why Ready to Assign can legitimately exceed the cash on hand
-   * (card debt nobody has budgeted for yet) and why showing the two side
-   * by side is worth doing rather than assuming one implies the other.
+   * Credit cards no longer break it. A card charge earmarks into that
+   * card's payment category and draws the same amount from wherever it
+   * belongs — its spending category, or Ready to Assign when
+   * uncategorized — so the pair always nets to zero against cash, which a
+   * card row never touches. `creditDebtMinor` is therefore a liability
+   * reported alongside, not a term in the identity.
    */
   cashOnHandMinor: number;
   /** Balance of on-budget credit accounts at the end of this month — negative when money is owed. */
@@ -110,6 +105,7 @@ async function computeMonthView(db: Db, budgetId: string, month: string): Promis
     month,
     readyToAssign: 0,
     incomeThisMonth: 0,
+    unbudgetedCardSpending: 0,
     categories: {},
   };
   const targets = computeTargets({

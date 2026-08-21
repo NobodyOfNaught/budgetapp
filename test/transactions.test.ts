@@ -464,12 +464,185 @@ describe('paying a credit card: the shape that actually drains the earmark', () 
     expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
   });
 
-  it('the same two rows left UNLINKED leave the earmark stranded at its full value', async () => {
-    // The trap: each row looks individually reasonable, and the account
-    // balances are right, but the card-side inflow is uncategorized on a
-    // credit account so the ledger routes it INTO Payment (+50), exactly
-    // cancelling the outflow leg's -50. Payment still reads $50 owed-and-
-    // funded for a card that has already been paid.
+  it('linking a card payment categorizes the paying leg on its own — no follow-up needed', async () => {
+    // The gap this closes. Both halves of an imported card payment arrive
+    // uncategorized, and link-transfer REFUSES a categorized leg, so a
+    // payment built by linking could never have the categorized leg the
+    // ledger needs — real cash left chequing while the earmark sat
+    // untouched. Linking now recognizes the shape and does it.
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-autocat@example.com');
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(5000);
+
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
+    });
+
+    const { body: linked } = await callJson<{ paymentCategoryId: string | null }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inn.transactionId }) },
+    );
+    expect(linked.paymentCategoryId).toBe(paymentCat);
+
+    // Drained without any PATCH — that is the whole point.
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
+
+    // The CARD leg stays uncategorized: it is the half the ledger skips.
+    const rows = await env.DB.prepare('select id, category_id as categoryId from transactions where id in (?, ?)')
+      .bind(out.transactionId, inn.transactionId)
+      .all<{ id: string; categoryId: string | null }>();
+    expect(rows.results.find((r) => r.id === out.transactionId)?.categoryId).toBe(paymentCat);
+    expect(rows.results.find((r) => r.id === inn.transactionId)?.categoryId).toBeNull();
+  });
+
+  it('works when the link is initiated from the CARD side', async () => {
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-autocat-reverse@example.com');
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${inn.transactionId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: out.transactionId }),
+    });
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
+  });
+
+  it('leaves a cash ADVANCE alone — money out of a card is not a payment', async () => {
+    // Direction is checked, not assumed. Money leaving a credit account
+    // increases the debt; categorizing that to the payment category would
+    // claim a payment had been made.
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-advance@example.com');
+    const { body: cardOut } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: cashIn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '50.00' }),
+    });
+    const { body: linked } = await callJson<{ paymentCategoryId: string | null }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${cardOut.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: cashIn.transactionId }) },
+    );
+    expect(linked.paymentCategoryId).toBeNull();
+    // Payment still reads just the grocery purchase's 50. The advance's
+    // card leg is now a LINKED transfer between two on-budget accounts,
+    // which the ledger skips entirely — so it neither drains the earmark
+    // (correct: nothing was paid) nor adds to it.
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(5000);
+  });
+
+  it('does not touch a transfer between two non-card accounts', async () => {
+    const { app, sessionCookie, budgetId, checking } = await setup('cc-plain-transfer@example.com');
+    const savings = await createAccount(app, sessionCookie, budgetId, { name: 'Savings', type: 'savings' });
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: savings, date: '2026-03-20', amount: '50.00' }),
+    });
+    const { body: linked } = await callJson<{ paymentCategoryId: string | null }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: inn.transactionId }) },
+    );
+    expect(linked.paymentCategoryId).toBeNull();
+  });
+
+  it('unlinking clears the payment category it set, restoring the earmark', async () => {
+    // A payment category on a row no longer paired with that card claims
+    // to pay down a card it is not connected to — the same reason the
+    // "Transfer : X" payee is cleared on unlink.
+    const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-unlink@example.com');
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inn.transactionId }),
+    });
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
+
+    const { body: unlinked } = await callJson<{ clearedCategories: number }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/unlink-transfer`,
+      { method: 'POST' },
+    );
+    expect(unlinked.clearedCategories).toBe(1);
+    // 0.00 under the unified model. With the pair broken, the grocery
+    // purchase's +50 earmark stands, and the card-side inflow is once
+    // again an ordinary uncategorized row on a credit account — which now
+    // means +50 to Ready to Assign and -50 off the earmark, netting the
+    // category back to zero. (Under the old rules this read 100.00,
+    // because raw card rows went into the category undoubled.)
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(0);
+  });
+
+  it('a category the USER chose survives unlinking', async () => {
+    // Only the auto-set shape is cleared — a payment category pointing at
+    // the other leg's account. Anything else is the user's decision.
+    const { app, sessionCookie, budgetId, checking } = await setup('cc-pay-user-category@example.com');
+    const savings = await createAccount(app, sessionCookie, budgetId, { name: 'Savings', type: 'savings' });
+    const groceries = await firstCategoryId(app, sessionCookie, budgetId);
+    const { body: out } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-20', amount: '-50.00' }),
+    });
+    const { body: inn } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: savings, date: '2026-03-20', amount: '50.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/link-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ otherTransactionId: inn.transactionId }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ categoryId: groceries }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${out.transactionId}/unlink-transfer`, {
+      method: 'POST',
+    });
+    const row = await env.DB.prepare('select category_id as categoryId from transactions where id = ?')
+      .bind(out.transactionId)
+      .first<{ categoryId: string | null }>();
+    expect(row?.categoryId).toBe(groceries);
+  });
+
+  it('the same two rows left UNLINKED double-count against the payment category', async () => {
+    // The trap: each row looks individually reasonable and the account
+    // balances are right, but nothing ties them together, so the ledger
+    // sees a payment out of chequing AND an unexplained inflow on the
+    // card. Under the unified model the first drains the earmark (-50)
+    // and the second takes another -50 off it, leaving Payment at -50 —
+    // reading as an overpaid card when nothing of the sort happened.
+    //
+    // (Under the old rules this read +50 rather than -50; the shape was
+    // wrong either way, which is the point of the case. Linking the pair
+    // is what makes it right, and the test above shows linking now does
+    // the categorizing for you.)
     const { app, sessionCookie, budgetId, checking, card, paymentCat } = await setup('cc-pay-unlinked@example.com');
 
     await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
@@ -481,7 +654,7 @@ describe('paying a credit card: the shape that actually drains the earmark', () 
       body: JSON.stringify({ kind: 'ordinary', accountId: card, date: '2026-03-20', amount: '50.00' }),
     });
 
-    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(5000); // NOT 0
+    expect(await paymentAvailable(app, sessionCookie, budgetId, paymentCat)).toBe(-5000); // NOT 0
   });
 });
 

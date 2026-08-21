@@ -307,3 +307,141 @@ describe('authorization', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('covering an overspent category', () => {
+  // The arithmetic behind BudgetMonth.tsx's "Cover" button, pinned here
+  // because the button is a one-line UI affordance over a claim about the
+  // ledger: assigning `assigned - available` lands available on EXACTLY
+  // zero. That falls out of available = assigned + activity + carryover —
+  // substituting assigned' = assigned - available gives available' =
+  // available - available — so it holds whatever the activity and
+  // carryover happen to be, which is what makes a single button safe.
+  async function overspent(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const [category] = await spendingCategoryIds(app, sessionCookie, budgetId);
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '500.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'ordinary',
+        accountId,
+        date: '2026-03-10',
+        amount: '-64.73',
+        categoryId: category!.id,
+      }),
+    });
+    return { app, sessionCookie, budgetId, categoryId: category!.id };
+  }
+
+  async function month(
+    app: Awaited<ReturnType<typeof signInNewUser>>['app'],
+    cookie: string,
+    budgetId: string,
+    m = '2026-03',
+  ) {
+    const { body } = await callJson<MonthView>(app, cookie, `/api/v1/budgets/${budgetId}/months/${m}`);
+    return body;
+  }
+
+  it('lands available on exactly zero from nothing assigned', async () => {
+    // The screenshot case: Boogie at assigned 0.00, available -64.73.
+    const { app, sessionCookie, budgetId, categoryId } = await overspent('cover-basic@example.com');
+
+    const before = await month(app, sessionCookie, budgetId);
+    expect(before.categories[categoryId]).toMatchObject({ assigned: 0, available: -6473 });
+
+    const amounts = before.categories[categoryId]!;
+    const { body: after } = await callJson<MonthView>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/months/2026-03/assignments`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          assignments: [{ categoryId, assigned: ((amounts.assigned - amounts.available) / 100).toFixed(2) }],
+        }),
+      },
+    );
+    expect(after.categories[categoryId]).toMatchObject({ assigned: 6473, available: 0 });
+  });
+
+  it('lands on zero when the category already had money assigned', async () => {
+    // assigned - available is an ADJUSTMENT, not a replacement: 20.00
+    // already assigned against -44.73 available must end at 64.73, not
+    // at 44.73. Getting this backwards is the obvious way to write the
+    // button wrong, and it looks right on the zero-assigned case above.
+    const { app, sessionCookie, budgetId, categoryId } = await overspent('cover-partial@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03/assignments`, {
+      method: 'PUT',
+      body: JSON.stringify({ assignments: [{ categoryId, assigned: '20.00' }] }),
+    });
+
+    const before = await month(app, sessionCookie, budgetId);
+    expect(before.categories[categoryId]).toMatchObject({ assigned: 2000, available: -4473 });
+
+    const amounts = before.categories[categoryId]!;
+    const { body: after } = await callJson<MonthView>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/months/2026-03/assignments`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          assignments: [{ categoryId, assigned: ((amounts.assigned - amounts.available) / 100).toFixed(2) }],
+        }),
+      },
+    );
+    expect(after.categories[categoryId]).toMatchObject({ assigned: 6473, available: 0 });
+  });
+
+  it('lands on zero when a balance carried in from last month', async () => {
+    // The carryover case, and the reason the button must read `available`
+    // rather than `-activity`. A spending category can only be negative in
+    // the month it was overspent — cash overspending resets to 0 the next
+    // month and comes out of Ready to Assign instead (see
+    // src/domain/ledger.ts) — so the way `available` diverges from this
+    // month's activity is a POSITIVE balance rolling in. Here 20.00 rolls
+    // from March into April and 64.73 is spent in April: available is
+    // -44.73, but the assignment needed is 44.73, not the 64.73 that
+    // activity alone would suggest.
+    const { app, sessionCookie, budgetId } = await signInNewUser('cover-carryover@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const [category] = await spendingCategoryIds(app, sessionCookie, budgetId);
+    const categoryId = category!.id;
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '500.00' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/months/2026-03/assignments`, {
+      method: 'PUT',
+      body: JSON.stringify({ assignments: [{ categoryId, assigned: '20.00' }] }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-04-10', amount: '-64.73', categoryId }),
+    });
+
+    const april = await month(app, sessionCookie, budgetId, '2026-04');
+    const amounts = april.categories[categoryId]!;
+    expect(amounts).toMatchObject({ assigned: 0, activity: -6473, available: -4473 });
+
+    const { body: after } = await callJson<MonthView>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/months/2026-04/assignments`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          assignments: [{ categoryId, assigned: ((amounts.assigned - amounts.available) / 100).toFixed(2) }],
+        }),
+      },
+    );
+    expect(after.categories[categoryId]).toMatchObject({ assigned: 4473, available: 0 });
+  });
+});

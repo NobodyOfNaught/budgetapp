@@ -154,6 +154,25 @@ export function BudgetMonth({
     putAssignments([{ categoryId, assigned: draft.trim() === '' ? '0' : draft }]);
   }
 
+  /**
+   * Assign exactly enough to bring an overspent category back to zero.
+   *
+   * `available` is negative here, so `assigned - available` ADDS its
+   * magnitude — Boogie at assigned 0.00 / available -64.73 becomes
+   * assigned 64.73. Computed from the server's own numbers rather than
+   * the draft input, so a half-typed value sitting in the box can't be
+   * folded into the total.
+   *
+   * Deliberately not a "cover everything" sweep: the money has to come
+   * from Ready to Assign, and which overspending to cover first is a real
+   * decision when there isn't enough to go round.
+   */
+  async function coverOverspending(categoryId: string) {
+    const amounts = view?.categories[categoryId];
+    if (!amounts || amounts.available >= 0) return;
+    await putAssignments([{ categoryId, assigned: toDraft(amounts.assigned - amounts.available) }]);
+  }
+
   function toggleMove(categoryId: string) {
     if (moveOpenFor === categoryId) {
       setMoveOpenFor(null);
@@ -422,6 +441,23 @@ export function BudgetMonth({
                             </td>
                             <td align="right" style={{ color: amountColor(amounts.available), fontWeight: 'bold' }}>
                               {formatMinor(amounts.available)}
+                              {/* Only offered where it means something —
+                                  an already-covered category has nothing
+                                  to cover, so the button isn't there to
+                                  be clicked by mistake. */}
+                              {amounts.available < 0 && (
+                                <>
+                                  {' '}
+                                  <button
+                                    type="button"
+                                    onClick={() => coverOverspending(c.id)}
+                                    title={`Assign ${formatMinor(-amounts.available)} to bring this back to $0.00`}
+                                    style={{ fontWeight: 'normal' }}
+                                  >
+                                    Cover
+                                  </button>
+                                </>
+                              )}
                             </td>
                             <td align="right" style={{ color: target ? neededColor(target.status) : '#999' }}>
                               {target ? (

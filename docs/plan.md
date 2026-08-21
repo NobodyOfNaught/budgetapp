@@ -1197,6 +1197,34 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 19 — Review, and edit, transactions already approved
+
+Approving a row was previously one-way: `GET /imports/review` only ever listed
+`approved = false` rows, so a mistake that slipped through (an uncategorized starting balance,
+a miscategorized purchase — exactly the kind PR 18's investigation turned up by hand, with SQL)
+had no screen of its own. Finding one meant knowing to look, and looking meant opening each
+account's register in turn.
+
+`GET /imports/review` now accepts `?includeApproved=true`, which drops the `approved = false`
+filter and returns everything — capped at `REVIEW_ROW_LIMIT` (500), newest first, the same
+"one account's history has no natural upper bound the way a whole budget's doesn't" reasoning as
+the register list's own cap. The default (no query param) is unchanged. Rows now carry
+`cleared`, `approved`, and `isSplit`, the last of these because a split parent — categoryId null
+by construction, its children carrying the real per-category amounts — would otherwise render as
+just another uncategorized row; imports never produce one and a manual split is approved
+outright, so this was unreachable before `includeApproved` existed.
+
+The screen (`ReviewImport.tsx`) gained a "Show approved transactions too" checkbox, an amber dot
+on any row still awaiting approval (so a mixed list stays legible), and a per-row **Edit**
+button opening the same `TransactionForm` the Register uses — same date/amount/payee/memo/split/
+transfer editing, not a second implementation of it. That reuse needed one small refactor:
+`TransactionForm`'s `editing` prop was typed as `RegisterTransaction`, which `ReviewTransaction`
+doesn't structurally satisfy (no `payeeId`, `balance`). Pulling out the fields the form actually
+reads into a new `EditableTransaction` interface — both `RegisterTransaction` and
+`ReviewTransaction` are supersets of it — let both screens hand it the same row type without a
+cast. "Approve all" now only targets the rows genuinely awaiting approval, and its label says how
+many.
+
 ### PR 18 — The unified credit-card model
 
 A real budget read **Ready to Assign \$990.95 against \$521.37 of cash**, which is not a state

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { apiFetch } from '../api';
-import type { CategoryGroup, ReviewTransaction } from '../types';
+import type { Account, CategoryGroup, ReviewTransaction } from '../types';
+import { TransactionForm } from './TransactionForm';
 
 function formatMinor(minor: number, currencyCode: string): string {
   const sign = minor < 0 ? '-' : '';
@@ -23,14 +24,24 @@ function amountColor(minor: number): string {
  * notes. Imported rows are real transactions that already move balances and
  * Ready to Assign — this screen is where they get a category and a human's
  * confirmation, not a gate they sit behind.
+ *
+ * With "Show approved too" ticked, the same screen also lists everything
+ * ELSE in the budget — the mechanism for catching a mistake that already
+ * slipped past approval (an uncategorized starting balance, a purchase
+ * filed under the wrong category), rather than needing to hunt for it
+ * account by account in the Register. Same table, same edit affordances;
+ * only the `approved` filter widens.
  */
 export function ReviewImport({
   budgetId,
+  accounts,
   categoryGroups,
   refreshToken,
   onChanged,
 }: {
   budgetId: string;
+  /** Passed straight through to TransactionForm when editing a row — see Register.tsx's identical use. */
+  accounts: Account[];
   categoryGroups: CategoryGroup[];
   /**
    * Bumped by the caller after an import lands. Needed because Budget.tsx
@@ -48,6 +59,10 @@ export function ReviewImport({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Off by default — the unapproved-only queue is what most visits are
+  // for, and a whole-budget listing is heavier (see REVIEW_ROW_LIMIT on
+  // the API side) and a different kind of task: an audit, not a queue.
+  const [showApproved, setShowApproved] = useState(false);
   // The one row (if any) whose "Make rule" form is open — matched against
   // its importPayeeRaw, prefilled from the heuristic's own best-effort
   // name as a starting point to refine. See src/import/payee-name.ts and
@@ -58,15 +73,24 @@ export function ReviewImport({
   const [rulePayeeName, setRulePayeeName] = useState('');
   const [ruleCategoryId, setRuleCategoryId] = useState('');
   const [ruleBusy, setRuleBusy] = useState(false);
+  // The row (if any) open in the full edit form — date/amount/payee/memo,
+  // not just the category dropdown below. Mode mirrors Register.tsx's own
+  // logic for picking one: a row is exactly one of split, transfer, or
+  // ordinary, decided by its own shape rather than something the caller
+  // chooses.
+  const [editForm, setEditForm] = useState<{ mode: 'ordinary' | 'transfer' | 'split'; editing: ReviewTransaction } | null>(
+    null,
+  );
 
   function reload() {
-    apiFetch<{ transactions: ReviewTransaction[] }>(`/budgets/${budgetId}/imports/review`).then((res) => {
+    const qs = showApproved ? '?includeApproved=true' : '';
+    apiFetch<{ transactions: ReviewTransaction[] }>(`/budgets/${budgetId}/imports/review${qs}`).then((res) => {
       setRows(res.transactions);
       setDrafts(Object.fromEntries(res.transactions.map((t) => [t.id, t.categoryId ?? ''])));
     });
   }
 
-  useEffect(reload, [budgetId, refreshToken]);
+  useEffect(reload, [budgetId, refreshToken, showApproved]);
 
   const assignable = categoryGroups.flatMap((g) =>
     g.categories.filter((c) => c.kind !== 'income' && !c.hiddenAt).map((c) => ({ id: c.id, name: c.name, groupName: g.name })),
@@ -123,31 +147,70 @@ export function ReviewImport({
 
   if (rows === null) return <p>Loading…</p>;
 
-  if (rows.length === 0) {
-    return (
-      <section>
-        <h2>Review</h2>
-        <p>Nothing waiting to be reviewed. Imported transactions show up here until you approve them.</p>
-      </section>
-    );
-  }
+  const unapprovedIds = rows.filter((r) => !r.approved).map((r) => r.id);
 
   return (
     <section>
       <h2>Review</h2>
-      <p style={{ color: '#666' }}>
-        {rows.length} imported {rows.length === 1 ? 'transaction' : 'transactions'}. These already affect your balances — approving
-        just confirms the category.
-      </p>
-      {error && <p style={{ color: '#c0392b' }}>{error}</p>}
-
       <p>
-        <button onClick={() => approve(rows.map((r) => r.id))} disabled={busy}>
-          {busy ? 'Saving…' : 'Approve all'}
-        </button>
+        <label>
+          <input type="checkbox" checked={showApproved} onChange={(e) => setShowApproved(e.target.checked)} /> Show approved
+          transactions too
+        </label>{' '}
+        <span style={{ color: '#666' }}>
+          — for catching a mistake that already slipped past approval, not just what's waiting on one.
+        </span>
       </p>
 
-      <div className="table-scroll">
+      {rows.length === 0 ? (
+        <p>
+          {showApproved
+            ? 'No transactions found.'
+            : 'Nothing waiting to be reviewed. Imported transactions show up here until you approve them.'}
+        </p>
+      ) : (
+        <>
+          <p style={{ color: '#666' }}>
+            {showApproved ? (
+              <>
+                {rows.length} {rows.length === 1 ? 'transaction' : 'transactions'}
+                {unapprovedIds.length > 0 && <> — {unapprovedIds.length} still awaiting approval</>}.
+              </>
+            ) : (
+              <>
+                {rows.length} imported {rows.length === 1 ? 'transaction' : 'transactions'}. These already affect your
+                balances — approving just confirms the category.
+              </>
+            )}
+          </p>
+          {error && <p style={{ color: '#c0392b' }}>{error}</p>}
+
+          {unapprovedIds.length > 0 && (
+            <p>
+              <button onClick={() => approve(unapprovedIds)} disabled={busy}>
+                {busy ? 'Saving…' : `Approve all (${unapprovedIds.length})`}
+              </button>
+            </p>
+          )}
+
+          {editForm && (
+            <TransactionForm
+              budgetId={budgetId}
+              accountId={editForm.editing.accountId}
+              accounts={accounts}
+              categoryGroups={categoryGroups}
+              mode={editForm.mode}
+              editing={editForm.editing}
+              onSaved={() => {
+                setEditForm(null);
+                reload();
+                onChanged();
+              }}
+              onCancel={() => setEditForm(null)}
+            />
+          )}
+
+          <div className="table-scroll">
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
@@ -169,7 +232,15 @@ export function ReviewImport({
               return (
                 <Fragment key={row.id}>
                   <tr style={{ borderTop: '1px solid #eee' }}>
-                    <td>{row.date}</td>
+                    <td>
+                      {row.date}
+                      {!row.approved && (
+                        <span title="Not yet approved" style={{ color: '#b8860b' }}>
+                          {' '}
+                          ●
+                        </span>
+                      )}
+                    </td>
                     <td>{row.accountName}</td>
                     <td>
                       {displayName}
@@ -201,7 +272,10 @@ export function ReviewImport({
                       {formatMinor(row.amountMinor, row.currencyCode)}
                     </td>
                     <td>
-                      {row.transferAccountId ? (
+                      {row.isSplit ? (
+                        // The category lives on its (unlisted) children, same as Register's own column — nothing to pick here.
+                        <span style={{ color: '#666' }}>(split)</span>
+                      ) : row.transferAccountId ? (
                         <span style={{ color: '#666' }}>
                           {row.transferAccountName ? `Transfer : ${row.transferAccountName}` : '(transfer)'}
                         </span>
@@ -217,9 +291,26 @@ export function ReviewImport({
                       )}
                     </td>
                     <td>
-                      <button onClick={() => approve([row.id])} disabled={busy}>
-                        Approve
-                      </button>{' '}
+                      {!row.isSplit && !row.transferAccountId && (
+                        <>
+                          <button onClick={() => approve([row.id])} disabled={busy}>
+                            {row.approved ? 'Save' : 'Approve'}
+                          </button>{' '}
+                        </>
+                      )}
+                      {row.isSplit ? (
+                        <button type="button" onClick={() => setEditForm({ mode: 'split', editing: row })}>
+                          Edit
+                        </button>
+                      ) : row.transferAccountId ? (
+                        <button type="button" onClick={() => setEditForm({ mode: 'transfer', editing: row })}>
+                          Edit
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => setEditForm({ mode: 'ordinary', editing: row })}>
+                          Edit
+                        </button>
+                      )}{' '}
                       {row.importPayeeRaw && (
                         <button type="button" onClick={() => (ruleDraftFor === row.id ? setRuleDraftFor(null) : openRuleForm(row))}>
                           {ruleDraftFor === row.id ? 'Cancel' : 'Make rule'}
@@ -265,7 +356,9 @@ export function ReviewImport({
             })}
           </tbody>
         </table>
-      </div>
+          </div>
+        </>
+      )}
     </section>
   );
 }

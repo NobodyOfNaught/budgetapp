@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { apiFetch } from '../api';
-import type { Account, CategoryGroup, RegisterTransaction } from '../types';
+import type { Account, CategoryGroup, EditableTransaction } from '../types';
 
 type Mode = 'ordinary' | 'transfer' | 'split';
 
@@ -34,7 +34,7 @@ export function TransactionForm({
    * for that; everything else about a split is editable.
    */
   mode: Mode;
-  editing?: RegisterTransaction | null;
+  editing?: EditableTransaction | null;
   onSaved: () => void;
   onCancel: () => void;
 }) {

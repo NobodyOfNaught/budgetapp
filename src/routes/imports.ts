@@ -213,14 +213,26 @@ importsRoute.get('/', async (c) => {
   return c.json({ batches: rows });
 });
 
+/** Hard cap on how many rows /review returns in one page — see the includeApproved note below. */
+const REVIEW_ROW_LIMIT = 500;
+
 /**
  * The review queue: everything imported but not yet approved, across every
- * account in the budget. Ordered newest-first because that's what a user
- * catching up on an import wants to see.
+ * account in the budget — plus, with `?includeApproved=true`, every OTHER
+ * transaction too, for catching a mistake that already slipped past
+ * approval (an uncategorized starting balance, a miscategorized purchase).
+ * That mode is a superset of the default, not a different screen: same
+ * columns, same edit affordances, just a wider `approved` filter.
+ *
+ * Ordered newest-first because that's what a user catching up wants to
+ * see, and capped at REVIEW_ROW_LIMIT for the same reason the register
+ * list caps at 500 — an unbounded whole-budget query has no natural upper
+ * bound the way one account's history does.
  */
 importsRoute.get('/review', async (c) => {
   const budgetId = budgetIdParam(c);
   const db = getDb(c.env);
+  const includeApproved = c.req.query('includeApproved') === 'true';
 
   // The other half of a transfer, and the account it sits in. "(transfer)"
   // alone told the user a row was linked but not to WHAT, which is the one
@@ -244,6 +256,8 @@ importsRoute.get('/review', async (c) => {
       currencyCode: transactions.currencyCode,
       categoryId: transactions.categoryId,
       memo: transactions.memo,
+      cleared: transactions.cleared,
+      approved: transactions.approved,
       accountId: transactions.accountId,
       accountName: accounts.name,
       payeeName: payees.name,
@@ -268,14 +282,34 @@ importsRoute.get('/review', async (c) => {
     .where(
       and(
         eq(transactions.budgetId, budgetId),
-        eq(transactions.approved, false),
+        includeApproved ? undefined : eq(transactions.approved, false),
         isNull(transactions.deletedAt),
         isNull(transactions.parentTransactionId),
       ),
     )
-    .orderBy(desc(transactions.date), desc(transactions.createdAt));
+    .orderBy(desc(transactions.date), desc(transactions.createdAt))
+    .limit(REVIEW_ROW_LIMIT);
 
-  return c.json({ transactions: rows });
+  // A split PARENT has categoryId === null by construction (its children
+  // carry the real per-category portions — see src/domain/ledger.ts), so
+  // without this it would render as just another uncategorized row. Only
+  // reachable via includeApproved: imports never produce splits, and a
+  // manually-entered split is approved outright, so the default
+  // (unapproved-only) query never sees one.
+  const splitParentIds = includeApproved
+    ? new Set(
+        (
+          await db
+            .select({ parentTransactionId: transactions.parentTransactionId })
+            .from(transactions)
+            .where(and(eq(transactions.budgetId, budgetId), isNull(transactions.deletedAt)))
+        )
+          .map((r) => r.parentTransactionId)
+          .filter((id): id is string => id !== null),
+      )
+    : new Set<string>();
+
+  return c.json({ transactions: rows.map((r) => ({ ...r, isSplit: splitParentIds.has(r.id) })) });
 });
 
 importsRoute.patch('/review', requireBudgetMember('editor'), async (c) => {

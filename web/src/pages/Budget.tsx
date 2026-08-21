@@ -187,6 +187,7 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
         {view.kind === 'review' && (
           <ReviewImport
             budgetId={budgetId}
+            accounts={accounts}
             categoryGroups={categoryGroups}
             refreshToken={reviewVersion}
             onChanged={() => {

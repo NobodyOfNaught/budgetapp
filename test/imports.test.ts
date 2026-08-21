@@ -69,6 +69,9 @@ interface ReviewRow {
   feeForDate: string | null;
   feeForAmountMinor: number | null;
   feeForCurrencyCode: string | null;
+  cleared: string;
+  approved: boolean;
+  isSplit: boolean;
 }
 
 async function createAccount(app: App, cookie: string, budgetId: string, body: Record<string, unknown>) {
@@ -91,8 +94,9 @@ async function importCsv(app: App, cookie: string, budgetId: string, accountId: 
   });
 }
 
-async function review(app: App, cookie: string, budgetId: string) {
-  const { body } = await callJson<{ transactions: ReviewRow[] }>(app, cookie, `/api/v1/budgets/${budgetId}/imports/review`);
+async function review(app: App, cookie: string, budgetId: string, includeApproved = false) {
+  const qs = includeApproved ? '?includeApproved=true' : '';
+  const { body } = await callJson<{ transactions: ReviewRow[] }>(app, cookie, `/api/v1/budgets/${budgetId}/imports/review${qs}`);
   return body.transactions;
 }
 
@@ -992,5 +996,119 @@ describe('the import cutoff date', () => {
       cutoffDate: 'last August',
     });
     expect(status).toBe(400);
+  });
+});
+
+describe('reviewing (and editing) transactions already approved', () => {
+  // The default query is unapproved-only, unchanged; ?includeApproved=true
+  // widens it to everything, so a mistake that already slipped past
+  // approval (a miscategorized purchase, an uncategorized starting
+  // balance) is findable without hunting through each account's register.
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    return { app, sessionCookie, budgetId, accountId: account.account.id };
+  }
+
+  it('the default query still excludes approved rows', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-approved-default@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '100.00' }), // approved: true by default
+    });
+    expect(await review(app, sessionCookie, budgetId)).toEqual([]);
+  });
+
+  it('includeApproved=true returns it, with approved: true', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-approved-included@example.com');
+    const { body: created } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '100.00' }),
+    });
+    const rows = await review(app, sessionCookie, budgetId, true);
+    const row = rows.find((r) => r.id === created.transactionId);
+    expect(row).toBeDefined();
+    expect(row?.approved).toBe(true);
+  });
+
+  it('mixes approved and unapproved rows in one list, each flagged correctly', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-approved-mixed@example.com');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '100.00' }), // approved
+    });
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD)); // unapproved
+
+    const rows = await review(app, sessionCookie, budgetId, true);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.approved)).toHaveLength(1);
+    expect(rows.filter((r) => !r.approved)).toHaveLength(1);
+  });
+
+  it('PATCH /review still recategorizes an already-approved row (approved stays true)', async () => {
+    // Fixing a mistake found this way shouldn't require a round trip
+    // through "unapprove, fix, reapprove" — the same PATCH already used
+    // for approving works directly on an approved row.
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-approved-recategorize@example.com');
+    const { body: created } = await callJson<{ transactionId: string }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-03-01', amount: '-50.00' }),
+    });
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const categoryId = cats.groups.flatMap((g) => g.categories).find((c) => c.kind === 'spending')!.id;
+
+    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/review`, {
+      method: 'PATCH',
+      body: JSON.stringify({ updates: [{ transactionId: created.transactionId, categoryId, approved: true }] }),
+    });
+    expect(status).toBe(200);
+
+    const rows = await review(app, sessionCookie, budgetId, true);
+    const row = rows.find((r) => r.id === created.transactionId);
+    expect(row?.categoryId).toBe(categoryId);
+    expect(row?.approved).toBe(true);
+  });
+
+  it('flags a split parent with isSplit, categoryId null — its children carry the real category', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-approved-split@example.com');
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const spending = cats.groups.flatMap((g) => g.categories).filter((c) => c.kind === 'spending');
+
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'split',
+        accountId,
+        date: '2026-03-01',
+        splits: [
+          { amount: '-30.00', categoryId: spending[0]!.id },
+          { amount: '-20.00', categoryId: spending[1]!.id },
+        ],
+      }),
+    });
+
+    const rows = await review(app, sessionCookie, budgetId, true);
+    // Only the parent — children carry parent_transaction_id and are
+    // excluded from this list, same as the register and the ledger.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.isSplit).toBe(true);
+    expect(rows[0]?.categoryId).toBeNull();
+    expect(rows[0]?.amountMinor).toBe(-5000);
+  });
+
+  it('an unapproved row reports isSplit: false and approved: false', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('review-not-split-not-approved@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD));
+    const [row] = await review(app, sessionCookie, budgetId);
+    expect(row?.isSplit).toBe(false);
+    expect(row?.approved).toBe(false);
   });
 });

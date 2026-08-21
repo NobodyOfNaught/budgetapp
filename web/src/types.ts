@@ -91,19 +91,30 @@ export interface Payee {
 
 export type ClearedStatus = 'uncleared' | 'cleared' | 'reconciled';
 
-export interface RegisterTransaction {
+/**
+ * The subset of a transaction's fields TransactionForm actually needs to
+ * prefill an edit (id, date, amount, payee, category, memo, cleared,
+ * transfer/split shape). Both RegisterTransaction and ReviewTransaction
+ * are supersets of this, so either can be passed to TransactionForm's
+ * `editing` prop without a cast — the form itself has never needed to
+ * know which screen it was opened from.
+ */
+export interface EditableTransaction {
   id: string;
   date: string;
   amountMinor: number;
   categoryId: string | null;
+  payeeName: string | null;
   memo: string | null;
   cleared: ClearedStatus;
-  payeeId: string | null;
-  payeeName: string | null;
   transferAccountId: string | null;
+  isSplit: boolean;
+}
+
+export interface RegisterTransaction extends EditableTransaction {
+  payeeId: string | null;
   /** false for statement-imported rows still awaiting review — see ReviewImport.tsx. */
   approved: boolean;
-  isSplit: boolean;
   balance: number;
 }
 
@@ -256,6 +267,11 @@ export interface ReviewTransaction {
   currencyCode: string;
   categoryId: string | null;
   memo: string | null;
+  cleared: ClearedStatus;
+  /** false for a row still awaiting review. Always false in the default query; only varies when fetched with includeApproved. */
+  approved: boolean;
+  /** True for a split parent — its children (not returned here) carry the real per-category amounts. See Register.tsx's identical flag. */
+  isSplit: boolean;
   accountId: string;
   accountName: string;
   payeeName: string | null;

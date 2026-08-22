@@ -91,5 +91,11 @@ export interface ImportOptions {
   members?: string[];
 }
 
-/** A statement parser: file text (plus optional per-provider options) in, normalised rows out. Pure. */
-export type StatementParser = (csvText: string, options?: ImportOptions) => ParseResult;
+/**
+ * A statement parser: file text (plus optional per-provider options) in,
+ * normalised rows out. Pure.
+ *
+ * `fileText`, not `csvText` — most providers here are CSV, but OFX/QFX/QBO
+ * is SGML (see src/import/ofx.ts), and the contract never cared which.
+ */
+export type StatementParser = (fileText: string, options?: ImportOptions) => ParseResult;

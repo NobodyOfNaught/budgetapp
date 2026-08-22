@@ -1112,3 +1112,132 @@ describe('reviewing (and editing) transactions already approved', () => {
     expect(row?.approved).toBe(false);
   });
 });
+
+describe('OFX / QFX / QBO through the real import route', () => {
+  // Three lines from the real Chase export. The parser's own behaviour is
+  // covered exhaustively in test/import/ofx.test.ts; this is about what
+  // the ROUTE does with it — FITID reaching transactions.import_id, and
+  // the payee/category layering that applies above every provider.
+  const CHASE = `OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+<OFX><CREDITCARDMSGSRSV1><CCSTMTRS>
+<CURDEF>USD
+<CCACCTFROM>
+<ACCTID>520844521-9753
+</CCACCTFROM>
+<BANKTRANLIST>
+<STMTTRN>
+<TRNTYPE>DEBIT
+<DTPOSTED>20260818120000[0:GMT]
+<TRNAMT>-16.50
+<FITID>2026081824692166230407098760557
+<NAME>Audible*MG7XU1053
+</STMTTRN>
+<STMTTRN>
+<TRNTYPE>CREDIT
+<DTPOSTED>20260817120000[0:GMT]
+<TRNAMT>154.00
+<FITID>GEN20260817AUTOMATIC_PAYME00000
+<NAME>AUTOMATIC PAYMENT - THANK
+</STMTTRN>
+<STMTTRN>
+<TRNTYPE>DEBIT
+<DTPOSTED>20260802120000[0:GMT]
+<TRNAMT>-149.00
+<FITID>GEN20260802+0000149.00ANNUAL_MEMBERSH00000
+<NAME>ANNUAL MEMBERSHIP FEE
+</STMTTRN>
+</BANKTRANLIST>
+<LEDGERBAL>
+<BALAMT>-6026.98
+<DTASOF>20260821120000[0:GMT]
+</LEDGERBAL>
+</CCSTMTRS></CREDITCARDMSGSRSV1></OFX>`;
+
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Chase', type: 'credit_card' });
+    return { app, sessionCookie, budgetId, accountId: account.account.id };
+  }
+
+  it('imports every transaction, keyed on the bank-provided FITID', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-basic@example.com');
+    const { status, body } = await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+    expect(status).toBe(201);
+    expect(body.imported).toBe(3);
+    expect(body.skipped).toEqual([]);
+
+    const ids = await env.DB.prepare('select import_id as importId from transactions where account_id = ? order by import_id')
+      .bind(accountId)
+      .all<{ importId: string }>();
+    expect(ids.results.map((r) => r.importId)).toEqual([
+      'fitid|2026081824692166230407098760557',
+      'fitid|GEN20260802+0000149.00ANNUAL_MEMBERSH00000',
+      'fitid|GEN20260817AUTOMATIC_PAYME00000',
+    ]);
+  });
+
+  it('re-importing the same file is a no-op — the point of having real ids', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-dedupe@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+
+    const { body: second } = await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+    expect(second.imported).toBe(0);
+    expect(second.duplicates).toBe(3);
+    expect(await review(app, sessionCookie, budgetId)).toHaveLength(3);
+  });
+
+  it('the .qbo download of the same period dedupes against the .qfx', async () => {
+    // They differ only by <INTU.BID>, and FITIDs are identical, so
+    // importing one after the other must add nothing. Worth pinning: a
+    // content-hash id scheme would also pass this, but only because the
+    // rows happen to be textually identical.
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-qbo@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+
+    const asQbo = `${CHASE}\n<!-- INTU.BID differs -->`.replace('VERSION:102', 'VERSION:102\n<INTU.BID>2430');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, asQbo, { provider: 'ofx' });
+    expect(body.imported).toBe(0);
+    expect(body.duplicates).toBe(3);
+  });
+
+  it('runs the shared payee heuristic over OFX rows like any other provider', async () => {
+    // The parser hands NAME through verbatim; cleanPayeeName at the route
+    // layer is what gets a crack at it. "AUTOMATIC PAYMENT - THANK" has an
+    // isolated ' - ' separator, which that heuristic cuts at.
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-payee@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const payment = rows.find((r) => r.amountMinor === 15400)!;
+    expect(payment.importPayeeRaw).toBe('AUTOMATIC PAYMENT - THANK'); // verbatim, for payee_rules to match
+    expect(payment.payeeName).toBe('AUTOMATIC PAYMENT');
+
+    // "Audible*MG7XU1053" is a single token — the heuristic only cuts at a
+    // token that STARTS with '*', so this one survives whole. That's the
+    // documented best-effort boundary (src/import/payee-name.ts): a
+    // one-line payee_rule is the intended fix, not more regex here.
+    const audible = rows.find((r) => r.amountMinor === -1650)!;
+    expect(audible.payeeName).toBe('Audible*MG7XU1053');
+  });
+
+  it('lands rows unapproved, in the review queue, like every other import', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-review@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, CHASE, { provider: 'ofx' });
+    const rows = await review(app, sessionCookie, budgetId);
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => !r.approved)).toBe(true);
+    expect(rows.every((r) => r.currencyCode === 'USD')).toBe(true);
+  });
+
+  it('respects the import cutoff date', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('ofx-route-cutoff@example.com');
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, CHASE, {
+      provider: 'ofx',
+      cutoffDate: '2026-08-10',
+    });
+    expect(body.imported).toBe(2); // the 2026-08-02 membership fee is held back
+    expect(body.beforeCutoff).toBe(1);
+  });
+});

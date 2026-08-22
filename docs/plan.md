@@ -1197,6 +1197,57 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 20 — OFX / QFX / QBO, the first non-CSV format
+
+Chase offers `.qfx` and `.qbo` downloads and no useful CSV, so the choice was an eighth
+bespoke CSV parser or the structured format seven banks were already throwing away. The two
+downloads for one period turn out to be **byte-identical except a single `<INTU.BID>` line**
+naming the Intuit product they were aimed at, so one parser and one provider entry serve both
+extensions — and `IMPORT_PROVIDERS` gains its first entry that names a FORMAT rather than a
+bank.
+
+What OFX carries that a CSV export drops:
+
+- **`<FITID>` is a real bank-assigned transaction id.** Five of the CSV parsers synthesise an
+  `import_id` from `date|amount|description|occurrence` because their files have no id column.
+  `transactions.import_id`'s own schema comment has said "Bank-provided FITID or a content
+  hash" since PR 7; this is the first provider supplying the former. Stored as `fitid|<id>`,
+  matching Vancity Visa's `ref|` convention for a bank-provided reference.
+- **Unambiguous dates** — `20260820120000[0:GMT]`, versus Simplii's MM/DD/YYYY-despite-being-
+  Canadian and Vancity's DD-Mon-YYYY, both of which had to be pinned by test against real files.
+- **A stated currency** (`<CURDEF>`) instead of one hardcoded per provider.
+
+Three things drove the implementation:
+
+- **OFX 1.x is SGML, not XML.** Closing tags on leaf elements are optional and Chase omits
+  them — `<CODE>0` is a complete element — so an XML parser rejects the document outright.
+  Values are read with a tolerant scan ending at the next `<` or line break, which parses
+  OFX 2.x (real XML) correctly too without a second code path, since a closing tag is just
+  another `<`.
+- **The sign lives on `<TRNAMT>`, not `<TRNTYPE>`.** TRNAMT is already signed the way this app
+  wants it and is what moved the balance; TRNTYPE is a label, read only to make a skip
+  message diagnosable. A bank mislabelling a refund must not flip the money.
+- **A file can hold more than one account.** An import writes into one, and two statements in
+  the same currency are indistinguishable to `resolveCurrencyAccount`, so merging them would
+  file one card's charges against another silently. Extra statements are refused visibly, by
+  ACCTID. Chase emits one per file; this is for the multi-account exports elsewhere.
+
+`DTPOSTED`'s timestamp is truncated rather than timezone-converted: Chase stamps 12:00:00 GMT
+precisely so the calendar day survives any reader's timezone, and `transactions.date` is a
+calendar date, not an instant.
+
+**Deliberately not done: switching existing accounts.** The unique index is
+`(account_id, import_id)`, and CSV rows carry content-hash ids while OFX rows carry FITIDs —
+nothing matches, so re-importing an overlapping period in the new format would silently
+duplicate everything. Migrating a working account is only safe from a clean date forward, or
+after undoing its batches. Two providers should never move: Splitwise isn't a bank, and Wise's
+CSV carries the source/target currency pairs the whole cross-currency transfer machinery
+derives its rates from.
+
+`<LEDGERBAL>` is parsed past but not yet used. Asserting an account's balance after import
+against the bank's own figure is the obvious follow-on and the strongest argument for this
+format; left out here to keep the change to one thing.
+
 ### PR 19 — Review, and edit, transactions already approved
 
 Approving a row was previously one-way: `GET /imports/review` only ever listed
@@ -1385,14 +1436,15 @@ see each other's edits.
 
 **Phase 4 — Statement import.** *Partially landed in PR 7, PR 9, PR 10, PR 13, and PR 15* —
 per-provider CSV parsers (Wise, BECU, Splitwise, AACU, Neo Mastercard, Vancity chequing,
-Vancity Visa, Simplii),
+Vancity Visa, Simplii) plus a format-level OFX/QFX/QBO parser (PR 20),
 an approve-imported-transactions queue, idempotent re-import, a provider-agnostic naming
 heuristic plus user-defined `payee_rules`, and — new in PR 10 — a non-bank provider modeled
 as a net-position clearing account with per-import member selection (see PR 10's notes
 above). Still to come: learned
 payee→category frequency (rules today are explicit, never inferred from history); a
-column-mapping UI for arbitrary CSVs and per-bank saved mappings; then OFX/QFX/QIF
-(structured, carries FITID); PDF last. Uploads land in R2, parsing runs through Queues for
+column-mapping UI for arbitrary CSVs and per-bank saved mappings; ~~then OFX/QFX/QIF
+(structured, carries FITID)~~ **OFX/QFX/QBO landed in PR 20** (QIF, a much older and looser
+format, is not planned); PDF last. Uploads land in R2, parsing runs through Queues for
 anything large. `import_batches` tracks a run; `transactions.import_id` makes re-imports
 idempotent. ~~Auto-matching a Splitwise settlement to its bank transaction as a transfer
 would need cross-account amount/date matching.~~ **Landed in PR 14** — suggested matches

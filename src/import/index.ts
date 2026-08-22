@@ -10,8 +10,23 @@ import { parseNeoCsv, suggestedCategoryName as neoSuggestion } from './neo';
 import { parseVancityCsv, suggestedCategoryName as vancitySuggestion } from './vancity';
 import { parseSimpliiCsv, suggestedCategoryName as simpliiSuggestion } from './simplii';
 import { parseVancityVisaCsv, suggestedCategoryName as vancityVisaSuggestion } from './vancity-visa';
+import { parseOfx, suggestedCategoryName as ofxSuggestion } from './ofx';
 
-export const IMPORT_PROVIDERS = ['wise', 'becu', 'splitwise', 'aacu', 'neo', 'vancity', 'vancity_visa', 'simplii'] as const;
+// 'ofx' is deliberately the format, not a bank: OFX/QFX/QBO is one shared
+// standard, so a single entry serves Chase and any other institution that
+// offers it — unlike the CSV entries above, each of which is one bank's
+// own layout. See src/import/ofx.ts.
+export const IMPORT_PROVIDERS = [
+  'wise',
+  'becu',
+  'splitwise',
+  'aacu',
+  'neo',
+  'vancity',
+  'vancity_visa',
+  'simplii',
+  'ofx',
+] as const;
 export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 
 const PARSERS: Record<ImportProvider, StatementParser> = {
@@ -23,6 +38,7 @@ const PARSERS: Record<ImportProvider, StatementParser> = {
   vancity: parseVancityCsv,
   vancity_visa: parseVancityVisaCsv,
   simplii: parseSimpliiCsv,
+  ofx: parseOfx,
 };
 
 /** Maps a provider's own category label onto a seeded category NAME, or null when there's no confident match. */
@@ -35,14 +51,15 @@ const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | nu
   vancity: vancitySuggestion,
   vancity_visa: vancityVisaSuggestion,
   simplii: simpliiSuggestion,
+  ofx: ofxSuggestion,
 };
 
 export function isImportProvider(value: string): value is ImportProvider {
   return (IMPORT_PROVIDERS as readonly string[]).includes(value);
 }
 
-export function parseStatement(provider: ImportProvider, csvText: string, options?: ImportOptions) {
-  return PARSERS[provider](csvText, options);
+export function parseStatement(provider: ImportProvider, fileText: string, options?: ImportOptions) {
+  return PARSERS[provider](fileText, options);
 }
 
 export function suggestCategoryName(provider: ImportProvider, providerCategory: string | null): string | null {

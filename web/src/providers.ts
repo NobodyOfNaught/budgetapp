@@ -16,4 +16,8 @@ export const IMPORT_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: 'vancity', label: 'Vancity (chequing)' },
   { value: 'vancity_visa', label: 'Vancity Visa' },
   { value: 'simplii', label: 'Simplii' },
+  // The one entry that names a FORMAT rather than a bank — OFX/QFX/QBO is
+  // a shared standard, so this covers Chase and anything else offering it.
+  // See src/import/ofx.ts.
+  { value: 'ofx', label: 'OFX / QFX / QBO (Chase and others)' },
 ];

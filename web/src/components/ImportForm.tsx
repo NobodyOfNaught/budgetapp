@@ -356,7 +356,16 @@ export function ImportForm({
         </div>
         <div>
           <label>
-            File <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required />
+            {/* Not just CSV since the OFX provider landed — a .qfx/.qbo
+                download is plain text too, so file.text() below needs no
+                change, only the picker's filter. */}
+            File{' '}
+            <input
+              type="file"
+              accept=".csv,text/csv,.ofx,.qfx,.qbo"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              required
+            />
           </label>
           {inspecting && <span style={{ color: '#666' }}> Checking file…</span>}
         </div>

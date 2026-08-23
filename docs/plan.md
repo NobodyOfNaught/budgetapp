@@ -1197,6 +1197,39 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 21 — Net worth graph, and Reports goes tabbed
+
+`Reports.tsx` stacked all three reports (spending, income vs. expense, net worth) on one page
+behind a shared start/end range, per PR 8's original "no charting dependency" call — every
+screen in this app is a plain HTML table. Asked directly for a net-worth *graph* with its own
+period control, that table-only stance for net worth specifically no longer held, so:
+
+- **The three reports became tabs** (`role="tablist"`, one panel visible at a time) instead of
+  three stacked sections. Spending and income-vs-expense keep sharing the original start/end
+  range; net worth gets its own period control, since a net-worth trend is naturally looked at
+  over a much longer or shorter horizon than a spending breakdown — preset buttons (6M/1Y/2Y/
+  5Y/All) plus the same custom month inputs as before, any manual edit clearing the active
+  preset.
+- **The graph is hand-rolled inline SVG** (`NetWorthChart.tsx`), not a charting library — PR 8's
+  "no dependency" reasoning still holds, it just no longer implies "no chart." One series needs
+  no legend (the "Net worth" tab label already says what's plotted), so it carries a crosshair +
+  tooltip instead (surfacing the assets/liabilities split that doesn't fit as a second line —
+  two y-axes on one chart is exactly the thing to not do), a direct end-label, and matching
+  keyboard support (arrow keys move the same crosshair a pointer would).
+- **"All" is a guess, not a real query.** There's no earliest-transaction endpoint, so the All
+  preset just asks for a fixed 10-year lookback (`ALL_TIME_MONTHS_BACK`) — a ceiling generous
+  enough to cover any real budget, not an attempt at the true start date. Left alone, that
+  guess is actively bad: a real smoke test against 10 months of seeded data showed 130 rows of
+  `$0.00` swamping both the chart and the table, the interesting slope compressed into the
+  last few pixels. `trimLeadingZeros` drops the leading all-zero run before either renders —
+  applied unconditionally, not just for "All", since a hand-picked custom start earlier than
+  any data hits the same problem. A genuinely empty budget (every month zero) is left as-is;
+  trimming that to nothing would be worse than a flat line at $0.
+- **`height="auto"` is a CSS value, not an SVG attribute** — passing it as a raw JSX prop throws
+  at render (`<svg>` expects a length). Only found because the smoke test's own
+  `page.on('console', …)` hook was checked, not just the screenshots; the chart still painted
+  correctly either way; the fix is `width`/`height` moved into the `style` object.
+
 ### PR 20 — OFX / QFX / QBO, the first non-CSV format
 
 Chase offers `.qfx` and `.qbo` downloads and no useful CSV, so the choice was an eighth

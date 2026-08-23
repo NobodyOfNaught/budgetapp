@@ -96,3 +96,26 @@ export function addMonths(date: string, months: number): string {
 export function addYears(date: string, years: number): string {
   return addMonths(date, years * 12);
 }
+
+/** Inclusive [start, end] list of calendar days, chronological order — the
+ * day-granularity equivalent of monthRange above. Plain string comparison
+ * is enough to order two 'YYYY-MM-DD' dates (no compareDates helper exists
+ * or is needed for the same reason none of the callers elsewhere in this
+ * codebase need one). */
+export function dateRange(start: string, end: string): string[] {
+  const dates: string[] = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) {
+    dates.push(d);
+  }
+  return dates;
+}
+
+/** Whole calendar days from `a` to `b` ('YYYY-MM-DD') — positive if `b` is
+ * later. Exact (via Date.UTC), not an approximation — used to cap a
+ * daily-report date range before dateRange would build a huge array. */
+export function daysBetween(a: string, b: string): number {
+  const pa = parseDate(a);
+  const pb = parseDate(b);
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.round((Date.UTC(pb.year, pb.month - 1, pb.day) - Date.UTC(pa.year, pa.month - 1, pa.day)) / msPerDay);
+}

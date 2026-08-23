@@ -1197,6 +1197,59 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 22 — Daily net worth, exact-day ranges, and a running average
+
+PR 21 gave net worth a graph but kept it monthly-only — asked directly for *daily* net worth
+with exact-day range selection and an optional running average, the fix touched all three
+layers, though the domain change is the one worth understanding first.
+
+- **`src/domain/reports.ts`: `netWorthTrend` and the new `netWorthDailyTrend` now share one
+  fold** (`foldNetWorthSnapshots`), parameterized on a list of exclusive-upper-bound dates
+  rather than months specifically. The monthly function passes `nextMonth(month)` per point,
+  the daily one `addDays(date, 1)` — same revaluation logic (still: a balance is worth what it
+  converts to at ONE rate today, never accumulated per-transaction conversions), the only
+  difference is snapshot granularity. This is a straight refactor of the existing function, not
+  new behavior — `netWorthTrend`'s own 484-test suite (unchanged) is what proves that.
+- **`src/routes/reports.ts`: `GET .../net-worth/daily?start=YYYY-MM-DD&end=YYYY-MM-DD`.**
+  Same shape as the monthly endpoint (days instead of months, same `unvalued` list), sharing a
+  new `loadNetWorthInputs` loader with it — which also fixed a latent inefficiency in the
+  monthly handler along the way: it used to fetch every transaction ever and filter to the
+  range in JS, now it's a `WHERE date < ?` at the D1 level like `loadLedgerInputs` already
+  does. **`MAX_DAILY_RANGE_DAYS` (4000) caps the range** — a daily report builds one point per
+  calendar day in JS rather than aggregating in SQL, so an unbounded range is an unbounded
+  array; a decade of days is still generous for what "daily net worth" means.
+- **`web/src/components/NetWorthChart.tsx` went from "monthly net worth" to "any net-worth
+  series."** Points now carry an opaque `key` (`formatLabel` turns it into a label) instead of
+  assuming `.month`, and an optional `movingAverage` prop layers a second line on the same
+  y-axis (never two y-scales — see the dataviz skill's one-axis rule). Two series means a
+  legend is no longer optional (line-keys, fixed categorical order — series-1 blue for net
+  worth, series-2 orange for the average) and the tooltip grows a second value instead of a
+  second end-label, which would just collide with the first at this spacing.
+- **`web/src/components/Reports.tsx`: a Monthly/Daily toggle inside the Net worth tab**, each
+  with fully independent period state — day-based presets (30D/90D/6M/1Y/All) and `<input
+  type="date">` pickers for Daily, so "select exact days" is literal. `trimLeadingZeros`
+  generalized to work on either shape (it only ever needed `assetsMinor`/`liabilitiesMinor`).
+  **A day-by-day table over a multi-year range is hundreds of unread rows** — past
+  `DAILY_TABLE_ROW_CAP` (200) it's replaced with a note; the chart (and its hover tooltip)
+  still carries every value.
+- **The moving average's hardest part wasn't the math, it was the edge.** A trailing N-day
+  average over exactly the fetched range is blank for its first N-1 days — not "no data
+  yet," just data the fetch didn't ask for. The daily fetch effect asks for `maWindowDays - 1`
+  extra days *before* the visible start whenever the average is on; `buildDailyChartData` drops
+  that lead-in again after using it to seed the rolling sum, so the average has a real value
+  from the very first displayed day. `trailingMovingAverage` itself never emits a partial-window
+  average — a 3-day mean standing in for a requested 7-day one would look identical to a real
+  one on the chart, which is worse than an honest gap.
+
+**A real bug the smoke test caught, not the type checker:** the moving average's `sum /
+windowDays` isn't guaranteed to land on a whole cent, and `formatMinor`'s `% 100` split assumes
+one — an unrounded average rendered as `$14,345.72.85714285704307` in the tooltip. Fixed by
+rounding in `trailingMovingAverage` itself (every value it produces is already a minor-unit
+integer everywhere else in this codebase, so it should be here too), not by teaching
+`formatMinor` to cope with fractional cents.
+
+No schema change; app-only, same as PR 21.
+
 ### PR 21 — Net worth graph, and Reports goes tabbed
 
 `Reports.tsx` stacked all three reports (spending, income vs. expense, net worth) on one page

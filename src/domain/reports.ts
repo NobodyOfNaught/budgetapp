@@ -10,7 +10,7 @@
 // the route layer (src/routes/reports.ts) rather than duplicated here, since
 // computeLedger already computes exactly those numbers correctly.
 
-import { nextMonth } from '../lib/dates';
+import { addDays, nextMonth } from '../lib/dates';
 import { convertToBudgetMinor } from '../lib/money';
 import { CREDIT_ACCOUNT_KINDS, type AccountKind } from './types';
 
@@ -39,9 +39,8 @@ export interface NetWorthAccountRow {
   fxRateMicros: number | null;
 }
 
-export interface NetWorthPoint {
-  month: string; // 'YYYY-MM-01'
-  /** Sum of balances for non-liability accounts, as of this month's last day. */
+export interface NetWorthSnapshot {
+  /** Sum of balances for non-liability accounts, as of this snapshot's date. */
   assetsMinor: number;
   /** Sum of balances for liability accounts (credit cards, lines of credit,
    * tracking liabilities) — naturally negative, since an outflow/balance-owed
@@ -51,16 +50,59 @@ export interface NetWorthPoint {
   netWorthMinor: number;
 }
 
+export interface NetWorthPoint extends NetWorthSnapshot {
+  month: string; // 'YYYY-MM-01'
+}
+
+export interface NetWorthDailyPoint extends NetWorthSnapshot {
+  date: string; // 'YYYY-MM-DD'
+}
+
 /**
- * Folds every transaction row forward once, snapshotting a running
- * per-account balance at the end of each month in `months`. `months` must be
- * ascending 'YYYY-MM-01' strings (see src/lib/dates.ts's monthRange) — every
- * row dated before a given month's end contributes to that month's
- * snapshot, whether or not it falls in an earlier month than the first
- * requested one (a balance carries forward from history the caller didn't
- * ask to see individually). An account absent from `accounts` (a data gap)
- * is silently excluded from both totals, same defensive posture as
- * computeLedger's unknown-counterpart handling.
+ * Snapshots a running per-account balance at the end of each month in
+ * `months` (ascending 'YYYY-MM-01' strings — see src/lib/dates.ts's
+ * monthRange). A thin wrapper over foldNetWorthSnapshots below, which does
+ * the actual folding and carries the doc comment on how a balance gets
+ * revalued; this function only decides the snapshot granularity (month
+ * boundaries) and re-attaches each month's label to its snapshot.
+ */
+export function netWorthTrend(
+  rows: AccountBalanceRow[],
+  accounts: NetWorthAccountRow[],
+  months: string[],
+  budgetCurrencyCode: string,
+): NetWorthPoint[] {
+  // month-end-exclusive: the first day of the FOLLOWING month.
+  const snapshots = foldNetWorthSnapshots(rows, accounts, months.map(nextMonth), budgetCurrencyCode);
+  return months.map((month, i) => ({ month, ...snapshots[i]! }));
+}
+
+/**
+ * Same fold as netWorthTrend, one snapshot per exact calendar day instead
+ * of per month — for the "daily net worth" view, where the reader picks
+ * exact days rather than months. `dates` must be ascending 'YYYY-MM-DD'
+ * strings (see src/lib/dates.ts's dateRange). Shares foldNetWorthSnapshots
+ * with the monthly version rather than a second copy of the revaluation
+ * logic — the only difference is the granularity of the snapshot boundary
+ * (day-end-exclusive here vs. month-end-exclusive there).
+ */
+export function netWorthDailyTrend(
+  rows: AccountBalanceRow[],
+  accounts: NetWorthAccountRow[],
+  dates: string[],
+  budgetCurrencyCode: string,
+): NetWorthDailyPoint[] {
+  // day-end-exclusive: the day immediately after.
+  const snapshots = foldNetWorthSnapshots(rows, accounts, dates.map((d) => addDays(d, 1)), budgetCurrencyCode);
+  return dates.map((date, i) => ({ date, ...snapshots[i]! }));
+}
+
+/**
+ * The fold shared by netWorthTrend and netWorthDailyTrend. `exclusiveUpperBounds`
+ * is an ascending list of 'YYYY-MM-DD' dates, each meaning "every row
+ * strictly before this date belongs to this snapshot" — the caller decides
+ * the granularity (month-end-exclusive vs. day-end-exclusive) by how it
+ * builds this list; the fold itself doesn't know or care which.
  *
  * FOREIGN-CURRENCY ACCOUNTS ARE REVALUED, NOT ACCUMULATED. A balance is
  * worth what it converts to at ONE rate today — not the sum of what each
@@ -75,20 +117,24 @@ export interface NetWorthPoint {
  * right answer, because what spending cost you doesn't change when the
  * rate moves afterwards. Flow is historical; stock is current.
  *
- * Two consequences worth knowing. Applying today's rate to every month
- * means past months RESTATE as the rate moves — inherent to revaluing with
- * a single stored rate, and still strictly better than accumulating an
+ * Two consequences worth knowing. Applying today's rate to every snapshot
+ * means past ones RESTATE as the rate moves — inherent to revaluing with a
+ * single stored rate, and still strictly better than accumulating an
  * artifact. And a foreign account with NO rate can't be revalued at all,
  * so it falls back to the old accumulated sum; the route reports those
- * accounts so the UI can say the number is an estimate rather than
- * present it as fact. See docs/plan.md's Phase 5 notes.
+ * accounts (see unvaluedForeignAccounts below) so the UI can say the
+ * number is an estimate rather than present it as fact.
+ *
+ * An account absent from `accounts` (a data gap) is silently excluded from
+ * both totals, same defensive posture as computeLedger's unknown-
+ * counterpart handling.
  */
-export function netWorthTrend(
+function foldNetWorthSnapshots(
   rows: AccountBalanceRow[],
   accounts: NetWorthAccountRow[],
-  months: string[],
+  exclusiveUpperBounds: string[],
   budgetCurrencyCode: string,
-): NetWorthPoint[] {
+): NetWorthSnapshot[] {
   const accountsById = new Map(accounts.map((a) => [a.id, a]));
   const sorted = [...rows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
@@ -99,11 +145,10 @@ export function netWorthTrend(
   // budgetAmountMinor to amountMinor), so that branch is a no-op.
   const balanceByAccount = new Map<string, { native: number; budget: number }>();
   let rowIndex = 0;
-  const points: NetWorthPoint[] = [];
+  const snapshots: NetWorthSnapshot[] = [];
 
-  for (const month of months) {
-    const monthEndExclusive = nextMonth(month); // first day of the FOLLOWING month
-    while (rowIndex < sorted.length && sorted[rowIndex]!.date < monthEndExclusive) {
+  for (const bound of exclusiveUpperBounds) {
+    while (rowIndex < sorted.length && sorted[rowIndex]!.date < bound) {
       const row = sorted[rowIndex]!;
       const running = balanceByAccount.get(row.accountId) ?? { native: 0, budget: 0 };
       running.native += row.amountMinor;
@@ -131,10 +176,10 @@ export function netWorthTrend(
       else assetsMinor += value;
     }
 
-    points.push({ month, assetsMinor, liabilitiesMinor, netWorthMinor: assetsMinor + liabilitiesMinor });
+    snapshots.push({ assetsMinor, liabilitiesMinor, netWorthMinor: assetsMinor + liabilitiesMinor });
   }
 
-  return points;
+  return snapshots;
 }
 
 /**

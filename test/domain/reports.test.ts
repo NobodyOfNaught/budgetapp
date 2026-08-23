@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  netWorthDailyTrend,
   netWorthTrend,
   unvaluedForeignAccounts,
   type AccountBalanceRow,
@@ -214,6 +215,61 @@ describe('netWorthTrend: foreign-currency accounts are revalued, not accumulated
     );
 
     expect(points[0]!.assetsMinor).toBe(10000); // not 5000
+  });
+});
+
+describe('netWorthDailyTrend', () => {
+  it('snapshots a balance on the exact day it changes, not just at month end', () => {
+    // The whole point of daily over monthly: a mid-month transaction moves
+    // the line on ITS day, not on the 1st of the next month.
+    const points = netWorthDailyTrend(
+      [row('checking', '2026-01-10', 1000)],
+      [account('checking', 'checking')],
+      ['2026-01-09', '2026-01-10', '2026-01-11'],
+      BUDGET_CURRENCY,
+    );
+
+    expect(points).toEqual([
+      { date: '2026-01-09', assetsMinor: 0, liabilitiesMinor: 0, netWorthMinor: 0 },
+      { date: '2026-01-10', assetsMinor: 100000, liabilitiesMinor: 0, netWorthMinor: 100000 },
+      { date: '2026-01-11', assetsMinor: 100000, liabilitiesMinor: 0, netWorthMinor: 100000 },
+    ]);
+  });
+
+  it('agrees with netWorthTrend at a month boundary — same fold, different granularity', () => {
+    const rows = [row('checking', '2026-01-05', 1000), row('checking', '2026-01-20', -300), row('card', '2026-01-15', -120)];
+    const accountsList = [account('checking', 'checking'), account('card', 'credit_card')];
+
+    const monthly = netWorthTrend(rows, accountsList, [M1], BUDGET_CURRENCY);
+    const daily = netWorthDailyTrend(rows, accountsList, ['2026-01-31'], BUDGET_CURRENCY);
+
+    expect(daily[0]).toEqual({
+      date: '2026-01-31',
+      assetsMinor: monthly[0]!.assetsMinor,
+      liabilitiesMinor: monthly[0]!.liabilitiesMinor,
+      netWorthMinor: monthly[0]!.netWorthMinor,
+    });
+  });
+
+  it('an empty budget over any day range is all zero', () => {
+    const points = netWorthDailyTrend([], [], ['2026-01-01', '2026-01-02'], BUDGET_CURRENCY);
+    expect(points).toEqual([
+      { date: '2026-01-01', assetsMinor: 0, liabilitiesMinor: 0, netWorthMinor: 0 },
+      { date: '2026-01-02', assetsMinor: 0, liabilitiesMinor: 0, netWorthMinor: 0 },
+    ]);
+  });
+
+  it('revalues a foreign account the same way as the monthly trend, per-day', () => {
+    const CAD_AT_0_73 = { currencyCode: 'CAD', fxRateMicros: 730000 };
+    const points = netWorthDailyTrend(
+      [foreignRow('cad', '2026-01-05', 100, 70)],
+      [account('cad', 'tracking_asset', CAD_AT_0_73)],
+      ['2026-01-04', '2026-01-05'],
+      BUDGET_CURRENCY,
+    );
+
+    expect(points[0]!.assetsMinor).toBe(0); // before the row
+    expect(points[1]!.assetsMinor).toBe(7300); // CAD 100 at 0.73, not the 70.00 it was booked at
   });
 });
 

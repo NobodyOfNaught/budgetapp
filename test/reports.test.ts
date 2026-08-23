@@ -18,6 +18,11 @@ interface NetWorthReport {
   unvalued: { accountId: string; name: string; currencyCode: string }[];
 }
 
+interface NetWorthDailyReport {
+  days: { date: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
+  unvalued: { accountId: string; name: string; currencyCode: string }[];
+}
+
 async function createAccount(
   app: Awaited<ReturnType<typeof signInNewUser>>['app'],
   sessionCookie: string,
@@ -226,6 +231,111 @@ describe('GET /api/v1/budgets/:budgetId/reports/net-worth', () => {
     // named, so the UI can mark it an estimate.
     expect(body.months[0]?.assetsMinor).toBe(128268);
     expect(body.unvalued).toEqual([{ accountId, name: 'Cash (CAD)', currencyCode: 'CAD' }]);
+  });
+});
+
+describe('GET /api/v1/budgets/:budgetId/reports/net-worth/daily', () => {
+  it('moves the balance on the exact day a transaction posts, not just at month end', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-daily@example.com');
+    const checking = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Checking',
+      type: 'checking',
+      startingBalance: '1000.00',
+      startingBalanceDate: '2026-03-01',
+    });
+    // Mid-range deposit — should show up on the 10th, not smeared across the month.
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId: checking, date: '2026-03-10', amount: '250.00' }),
+    });
+
+    const { status, body } = await callJson<NetWorthDailyReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2026-03-09&end=2026-03-11`,
+    );
+    expect(status).toBe(200);
+    expect(body.days).toEqual([
+      { date: '2026-03-09', assetsMinor: 100000, liabilitiesMinor: 0, netWorthMinor: 100000 },
+      { date: '2026-03-10', assetsMinor: 125000, liabilitiesMinor: 0, netWorthMinor: 125000 },
+      { date: '2026-03-11', assetsMinor: 125000, liabilitiesMinor: 0, netWorthMinor: 125000 },
+    ]);
+    expect(body.unvalued).toEqual([]);
+  });
+
+  it('agrees with the monthly endpoint at a month’s last day', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-daily-agree@example.com');
+    await createAccount(app, sessionCookie, budgetId, {
+      name: 'Card',
+      type: 'credit_card',
+      startingBalance: '-200.00',
+      startingBalanceDate: '2026-03-01',
+    });
+
+    const { body: monthly } = await callJson<NetWorthReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth?start=2026-03&end=2026-03`,
+    );
+    const { body: daily } = await callJson<NetWorthDailyReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2026-03-31&end=2026-03-31`,
+    );
+
+    expect(daily.days[0]?.assetsMinor).toBe(monthly.months[0]?.assetsMinor);
+    expect(daily.days[0]?.liabilitiesMinor).toBe(monthly.months[0]?.liabilitiesMinor);
+    expect(daily.days[0]?.netWorthMinor).toBe(monthly.months[0]?.netWorthMinor);
+  });
+
+  it('reports an unvalued foreign account the same way the monthly endpoint does', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-daily-unvalued@example.com');
+    const accountId = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Cash (CAD)',
+      type: 'tracking_asset',
+      currencyCode: 'CAD',
+      startingBalance: '1282.68',
+      startingBalanceDate: '2026-03-01',
+    });
+
+    const { body } = await callJson<NetWorthDailyReport>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2026-03-01&end=2026-03-01`,
+    );
+    expect(body.days[0]?.assetsMinor).toBe(128268);
+    expect(body.unvalued).toEqual([{ accountId, name: 'Cash (CAD)', currencyCode: 'CAD' }]);
+  });
+
+  it('400s when end precedes start, or a date is malformed', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-daily-invalid@example.com');
+
+    const { status: reversed } = await callJson(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2026-03-10&end=2026-03-01`,
+    );
+    expect(reversed).toBe(400);
+
+    const { status: malformed } = await callJson(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2026-03&end=2026-03-10`, // start is a month, not a day
+    );
+    expect(malformed).toBe(400);
+  });
+
+  it('400s a range wider than the daily cap, instead of building an enormous array', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('reports-net-worth-daily-toolarge@example.com');
+
+    const { status, body } = await callJson<{ error: string; maxDays: number }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/reports/net-worth/daily?start=2000-01-01&end=2026-01-01`,
+    );
+    expect(status).toBe(400);
+    expect(body.error).toBe('range_too_large');
+    expect(body.maxDays).toBeGreaterThan(0);
   });
 });
 

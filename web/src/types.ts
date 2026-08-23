@@ -315,6 +315,13 @@ export interface IncomeExpenseReport {
   months: { month: string; incomeMinor: number; expenseMinor: number }[];
 }
 
+/** Shared by NetWorthReport and NetWorthDailyReport — see src/domain/reports.ts's `unvaluedForeignAccounts`. */
+export interface UnvaluedAccount {
+  accountId: string;
+  name: string;
+  currencyCode: string;
+}
+
 export interface NetWorthReport {
   months: { month: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
   /**
@@ -323,7 +330,13 @@ export interface NetWorthReport {
    * transaction's own conversion — a figure that isn't really the value of
    * anything. Surfaced so the UI can say so. See src/domain/reports.ts.
    */
-  unvalued: { accountId: string; name: string; currencyCode: string }[];
+  unvalued: UnvaluedAccount[];
+}
+
+/** Same report, day granularity — see GET .../reports/net-worth/daily. */
+export interface NetWorthDailyReport {
+  days: { date: string; assetsMinor: number; liabilitiesMinor: number; netWorthMinor: number }[];
+  unvalued: UnvaluedAccount[];
 }
 
 // ---------------------------------------------------------------------------

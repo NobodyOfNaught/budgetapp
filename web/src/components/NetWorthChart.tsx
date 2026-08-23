@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import type { KeyboardEvent, PointerEvent } from 'react';
-import type { NetWorthReport } from '../types';
 
 // Same formatMinor duplication as every other screen (Reports.tsx,
 // Register.tsx, BudgetMonth.tsx) — house style, not shared.
@@ -8,14 +7,6 @@ function formatMinor(minor: number): string {
   const sign = minor < 0 ? '-' : '';
   const abs = Math.abs(minor);
   return `${sign}$${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, '0')}`;
-}
-
-function monthLabel(month: string): string {
-  return new Date(`${month.slice(0, 7)}-01T00:00:00Z`).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    timeZone: 'UTC',
-  });
 }
 
 /**
@@ -62,22 +53,56 @@ const MARGIN = { top: 20, right: 112, bottom: 36, left: 76 };
 const PLOT_WIDTH = WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = HEIGHT - MARGIN.top - MARGIN.bottom;
 
+export interface NetWorthChartPoint {
+  /** 'YYYY-MM-01' for a monthly point, 'YYYY-MM-DD' for a daily one — opaque to this component, only `formatLabel` interprets it. */
+  key: string;
+  assetsMinor: number;
+  liabilitiesMinor: number;
+  netWorthMinor: number;
+}
+
+/** A trailing moving average aligned 1:1 with `points` by index — `values[i]`
+ * is the average ending at `points[i]`, or null before there's a full
+ * window (see Reports.tsx's trailingMovingAverage; no partial-window
+ * average is ever shown — a half-filled window would read as a real one). */
+export interface NetWorthMovingAverage {
+  windowDays: number;
+  values: (number | null)[];
+}
+
 /**
- * Net worth over time as a single-series line chart — inline SVG, no
- * charting library (see this repo's existing "no charting dependency"
- * decision in docs/plan.md; a hand-rolled chart keeps that true while still
- * answering "show me a graph"). One series needs no legend box — the "Net
- * worth" tab label already names what's plotted — so this carries a
+ * Net worth over time as a line chart — inline SVG, no charting library
+ * (see this repo's existing "no charting dependency" decision in
+ * docs/plan.md; a hand-rolled chart keeps that true while still answering
+ * "show me a graph"). Works for either a monthly or a daily series —
+ * `points` carries an opaque `key` per point and the caller supplies
+ * `formatLabel` to turn it into an axis/tooltip label.
+ *
+ * A single series needs no legend box — the "Net worth" tab label already
+ * names what's plotted — so with `movingAverage` absent this carries a
  * crosshair + tooltip (with the assets/liabilities breakdown that doesn't
- * fit as a second line) and a direct end-label instead.
+ * fit as a second line) and a direct end-label instead. Once a moving
+ * average is layered on, that's two series sharing one y-axis (never two
+ * y-scales — see the dataviz skill's "one axis" rule), so a compact legend
+ * appears and the tooltip grows a second line rather than a second
+ * end-label (two end-labels this close together would collide).
  */
-export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) {
+export function NetWorthChart({
+  points,
+  formatLabel,
+  movingAverage,
+}: {
+  points: NetWorthChartPoint[];
+  formatLabel: (key: string) => string;
+  movingAverage?: NetWorthMovingAverage;
+}) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
 
   if (points.length === 0) return <p>No data in this range.</p>;
 
-  const values = points.map((p) => p.netWorthMinor);
-  const ticks = niceTicks(Math.min(...values), Math.max(...values), 5);
+  const maValues = movingAverage?.values ?? [];
+  const allValues = [...points.map((p) => p.netWorthMinor), ...maValues.filter((v): v is number => v !== null)];
+  const ticks = niceTicks(Math.min(...allValues), Math.max(...allValues), 5);
   const yMin = ticks[0]!;
   const yMax = ticks[ticks.length - 1]!;
 
@@ -86,6 +111,24 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
 
   const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xFor(i)} ${yFor(p.netWorthMinor)}`).join(' ');
   const areaPath = `${linePath} L ${xFor(points.length - 1)} ${yFor(yMin)} L ${xFor(0)} ${yFor(yMin)} Z`;
+
+  // The moving-average line can start partway through (null until the
+  // first full window), so it's built from runs of consecutive non-null
+  // values rather than one M-to-end path — a single path would draw a
+  // straight line across any gap instead of skipping it. In practice
+  // there's exactly one run (a single leading gap, then data to the end),
+  // but this stays correct if that ever isn't true.
+  const maPaths: string[] = [];
+  let currentPath = '';
+  maValues.forEach((v, i) => {
+    if (v === null) {
+      if (currentPath) maPaths.push(currentPath);
+      currentPath = '';
+      return;
+    }
+    currentPath += `${currentPath ? 'L' : 'M'} ${xFor(i)} ${yFor(v)} `;
+  });
+  if (currentPath) maPaths.push(currentPath);
 
   // Sparse x labels — evenly spaced across the plot (not "every Nth point"),
   // so the last two never land close enough to collide the way a plain
@@ -122,22 +165,44 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
   }
 
   const active = activeIndex !== null ? points[activeIndex]! : null;
+  const activeMa = activeIndex !== null ? (maValues[activeIndex] ?? null) : null;
   const endPoint = points[points.length - 1]!;
-  const endLabelUp = endPoint.netWorthMinor >= (values.reduce((a, b) => a + b, 0) / values.length || 0);
+  const endLabelUp = endPoint.netWorthMinor >= (points.reduce((a, p) => a + p.netWorthMinor, 0) / points.length || 0);
 
   return (
     <div className="net-worth-chart" style={{ position: 'relative', maxWidth: WIDTH }}>
-      {/* Scoped custom properties, not a fixed hex, so the line and grid
+      {/* Scoped custom properties, not fixed hex, so the lines and grid
           follow the browser's dark-mode rendering the same way the rest of
           this page's UA-default colors already do (:root sets
           `color-scheme: light dark` in styles.css) — this is the first
-          chart in the app, so it's also the first place that matters. */}
+          chart in the app, so it's also the first place that matters.
+          --nwc-series is the reference palette's categorical slot 1
+          (blue), --nwc-series-2 slot 2 (orange) — fixed order, not chosen
+          per-chart, per the dataviz skill's categorical-hue rule. */}
       <style>{`
-        .net-worth-chart { --nwc-series: #2a78d6; --nwc-grid: #e1e0d9; --nwc-axis: #c3c2b7; --nwc-muted: #767570; }
+        .net-worth-chart { --nwc-series: #2a78d6; --nwc-series-2: #eb6834; --nwc-grid: #e1e0d9; --nwc-axis: #c3c2b7; --nwc-muted: #767570; }
         @media (prefers-color-scheme: dark) {
-          .net-worth-chart { --nwc-series: #3987e5; --nwc-grid: #2c2c2a; --nwc-axis: #383835; --nwc-muted: #9a988f; }
+          .net-worth-chart { --nwc-series: #3987e5; --nwc-series-2: #d95926; --nwc-grid: #2c2c2a; --nwc-axis: #383835; --nwc-muted: #9a988f; }
         }
       `}</style>
+
+      {movingAverage && (
+        <div style={{ display: 'flex', gap: '1rem', fontSize: '0.85em', marginBottom: '0.25rem', color: 'var(--nwc-muted)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <svg width="16" height="2" aria-hidden="true">
+              <line x1="0" y1="1" x2="16" y2="1" stroke="var(--nwc-series)" strokeWidth={2} />
+            </svg>
+            Net worth
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <svg width="16" height="2" aria-hidden="true">
+              <line x1="0" y1="1" x2="16" y2="1" stroke="var(--nwc-series-2)" strokeWidth={2} />
+            </svg>
+            {movingAverage.windowDays}-day average
+          </span>
+        </div>
+      )}
+
       <svg
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         // `height: auto` is only valid as a CSS value, not a raw SVG
@@ -145,7 +210,7 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
         // makes the chart scale proportionally with its container.
         style={{ width: '100%', height: 'auto', display: 'block' }}
         role="img"
-        aria-label={`Net worth from ${monthLabel(points[0]!.month)} to ${monthLabel(endPoint.month)}, ending at ${formatMinor(endPoint.netWorthMinor)}`}
+        aria-label={`Net worth from ${formatLabel(points[0]!.key)} to ${formatLabel(endPoint.key)}, ending at ${formatMinor(endPoint.netWorthMinor)}`}
         tabIndex={0}
         onKeyDown={handleKeyDown}
         onPointerLeave={() => setActiveIndex(null)}
@@ -169,14 +234,17 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
         {points.map(
           (p, i) =>
             labelIndices.has(i) && (
-              <text key={p.month} x={xFor(i)} y={HEIGHT - MARGIN.bottom + 18} textAnchor="middle" fontSize={11} fill="var(--nwc-muted)">
-                {monthLabel(p.month)}
+              <text key={p.key} x={xFor(i)} y={HEIGHT - MARGIN.bottom + 18} textAnchor="middle" fontSize={11} fill="var(--nwc-muted)">
+                {formatLabel(p.key)}
               </text>
             ),
         )}
 
         <path d={areaPath} fill="var(--nwc-series)" opacity={0.1} stroke="none" />
         <path d={linePath} fill="none" stroke="var(--nwc-series)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        {maPaths.map((d, i) => (
+          <path key={i} d={d} fill="none" stroke="var(--nwc-series-2)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        ))}
 
         <circle cx={xFor(points.length - 1)} cy={yFor(endPoint.netWorthMinor)} r={4} fill="var(--nwc-series)" stroke="Canvas" strokeWidth={2} />
         <text
@@ -193,6 +261,9 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
           <>
             <line x1={xFor(activeIndex!)} x2={xFor(activeIndex!)} y1={MARGIN.top} y2={HEIGHT - MARGIN.bottom} stroke="var(--nwc-axis)" strokeWidth={1} />
             <circle cx={xFor(activeIndex!)} cy={yFor(active.netWorthMinor)} r={4} fill="var(--nwc-series)" stroke="Canvas" strokeWidth={2} />
+            {activeMa !== null && (
+              <circle cx={xFor(activeIndex!)} cy={yFor(activeMa)} r={4} fill="var(--nwc-series-2)" stroke="Canvas" strokeWidth={2} />
+            )}
           </>
         )}
 
@@ -214,7 +285,7 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
         <div
           style={{
             position: 'absolute',
-            top: 4,
+            top: movingAverage ? 28 : 4,
             left: 4,
             background: 'Canvas',
             color: 'CanvasText',
@@ -226,8 +297,13 @@ export function NetWorthChart({ points }: { points: NetWorthReport['months'] }) 
             boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
           }}
         >
-          <div>{monthLabel(active.month)}</div>
+          <div>{formatLabel(active.key)}</div>
           <div style={{ fontWeight: 600 }}>{formatMinor(active.netWorthMinor)}</div>
+          {movingAverage && (
+            <div style={{ color: 'var(--nwc-series-2)' }}>
+              {movingAverage.windowDays}-day average: {activeMa !== null ? formatMinor(activeMa) : 'not enough data yet'}
+            </div>
+          )}
           <div style={{ color: 'var(--nwc-muted)' }}>
             Assets {formatMinor(active.assetsMinor)} · Liabilities {formatMinor(active.liabilitiesMinor)}
           </div>

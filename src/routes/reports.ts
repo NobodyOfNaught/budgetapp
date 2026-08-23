@@ -5,16 +5,30 @@ import { requireBudgetMember } from '../auth/middleware';
 import { getDb, type Db } from '../db/client';
 import { accounts, budgets, categories, categoryMonths, transactions } from '../db/schema';
 import { computeLedger } from '../domain/ledger';
-import { netWorthTrend, unvaluedForeignAccounts } from '../domain/reports';
-import { compareMonths, monthRange, nextMonth } from '../lib/dates';
+import { netWorthDailyTrend, netWorthTrend, unvaluedForeignAccounts } from '../domain/reports';
+import { addDays, compareMonths, dateRange, daysBetween, monthRange, nextMonth } from '../lib/dates';
 import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// A daily net-worth range builds one point per calendar day in JS (see
+// netWorthDailyTrend) rather than aggregating in SQL, so an unbounded range
+// is an unbounded array — this caps it at a size that's still generous for
+// "daily net worth" (over a decade) while keeping the response and the
+// fold bounded. Monthly has no equivalent cap: a month range this long
+// would be over a thousand YEARS of months, not a realistic query.
+const MAX_DAILY_RANGE_DAYS = 4000;
 
 const rangeQuerySchema = z.object({
   start: z.string().regex(MONTH_RE, 'expected YYYY-MM'),
   end: z.string().regex(MONTH_RE, 'expected YYYY-MM'),
+});
+
+const dailyRangeQuerySchema = z.object({
+  start: z.string().regex(DATE_RE, 'expected YYYY-MM-DD'),
+  end: z.string().regex(DATE_RE, 'expected YYYY-MM-DD'),
 });
 
 /** Parses/validates `start`/`end` query params into 'YYYY-MM-01' month
@@ -25,6 +39,16 @@ function parseRange(c: Context<AppEnv>): { start: string; end: string } | null {
   const start = `${parsed.data.start}-01`;
   const end = `${parsed.data.end}-01`;
   if (compareMonths(start, end) > 0) return null;
+  return { start, end };
+}
+
+/** Same shape as parseRange but for exact 'YYYY-MM-DD' days — the net-worth
+ * daily endpoint's own range, independent of the month-only one above. */
+function parseDailyRange(c: Context<AppEnv>): { start: string; end: string } | null {
+  const parsed = dailyRangeQuerySchema.safeParse({ start: c.req.query('start'), end: c.req.query('end') });
+  if (!parsed.success) return null;
+  const { start, end } = parsed.data;
+  if (start > end) return null;
   return { start, end };
 }
 
@@ -114,7 +138,64 @@ reportsRoute.get('/net-worth', async (c) => {
   if (!range) return c.json({ error: 'invalid_range' }, 400);
 
   const db = getDb(c.env);
-  const [budgetRow, accountRows, balanceRows] = await Promise.all([
+  const [budgetRow, accountRows, balanceRows] = await loadNetWorthInputs(db, budgetId, nextMonth(range.end));
+  const budgetCurrencyCode = budgetRow[0]?.currencyCode;
+  if (!budgetCurrencyCode) return c.json({ error: 'not_found' }, 404);
+
+  const months = monthRange(range.start, range.end);
+  const points = netWorthTrend(balanceRows, accountRows, months, budgetCurrencyCode);
+
+  // Foreign accounts with no rate on file: their balance couldn't be
+  // revalued, so it's still an accumulated per-transaction sum. Reported
+  // rather than silently folded in — see src/domain/reports.ts.
+  const unvalued = unvaluedForeignAccounts(balanceRows, accountRows, budgetCurrencyCode).map((a) => ({
+    accountId: a.id,
+    name: a.name,
+    currencyCode: a.currencyCode,
+  }));
+
+  return c.json({ months: points, unvalued });
+});
+
+// Same report, day granularity instead of month — for the "daily net
+// worth" view, where the reader picks exact days rather than months and
+// optionally overlays a trailing N-day moving average (computed client-
+// side over this response; see web/src/components/NetWorthChart.tsx). Same
+// shape as /net-worth otherwise, right down to the unvalued list — just
+// dateRange/netWorthDailyTrend in place of monthRange/netWorthTrend.
+reportsRoute.get('/net-worth/daily', async (c) => {
+  const budgetId = budgetIdParam(c);
+  const range = parseDailyRange(c);
+  if (!range) return c.json({ error: 'invalid_range' }, 400);
+  if (daysBetween(range.start, range.end) > MAX_DAILY_RANGE_DAYS) {
+    return c.json({ error: 'range_too_large', maxDays: MAX_DAILY_RANGE_DAYS }, 400);
+  }
+
+  const db = getDb(c.env);
+  const [budgetRow, accountRows, balanceRows] = await loadNetWorthInputs(db, budgetId, addDays(range.end, 1));
+  const budgetCurrencyCode = budgetRow[0]?.currencyCode;
+  if (!budgetCurrencyCode) return c.json({ error: 'not_found' }, 404);
+
+  const days = dateRange(range.start, range.end);
+  const points = netWorthDailyTrend(balanceRows, accountRows, days, budgetCurrencyCode);
+
+  const unvalued = unvaluedForeignAccounts(balanceRows, accountRows, budgetCurrencyCode).map((a) => ({
+    accountId: a.id,
+    name: a.name,
+    currencyCode: a.currencyCode,
+  }));
+
+  return c.json({ days: points, unvalued });
+});
+
+/** The accounts + balance-affecting transactions loadNetWorthInputs shares
+ * between /net-worth and /net-worth/daily — everything up to but not
+ * including `throughDateExclusive`, since a snapshot's balance is a
+ * running total carried from all of history, not just what happened
+ * within the requested range. Filtered at the D1 level (not fetched whole
+ * and trimmed in JS) the same way loadLedgerInputs below already does. */
+async function loadNetWorthInputs(db: Db, budgetId: string, throughDateExclusive: string) {
+  return Promise.all([
     db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1),
     db
       .select({
@@ -139,27 +220,11 @@ reportsRoute.get('/net-worth', async (c) => {
           eq(transactions.budgetId, budgetId),
           isNull(transactions.deletedAt),
           isNull(transactions.parentTransactionId), // split parents carry no real balance impact of their own — see docs/plan.md
+          lt(transactions.date, throughDateExclusive),
         ),
       ),
   ]);
-  const budgetCurrencyCode = budgetRow[0]?.currencyCode;
-  if (!budgetCurrencyCode) return c.json({ error: 'not_found' }, 404);
-
-  const months = monthRange(range.start, range.end);
-  const inRange = balanceRows.filter((row) => row.date < nextMonth(range.end));
-  const points = netWorthTrend(inRange, accountRows, months, budgetCurrencyCode);
-
-  // Foreign accounts with no rate on file: their balance couldn't be
-  // revalued, so it's still an accumulated per-transaction sum. Reported
-  // rather than silently folded in — see src/domain/reports.ts.
-  const unvalued = unvaluedForeignAccounts(inRange, accountRows, budgetCurrencyCode).map((a) => ({
-    accountId: a.id,
-    name: a.name,
-    currencyCode: a.currencyCode,
-  }));
-
-  return c.json({ months: points, unvalued });
-});
+}
 
 /** The same accounts/categories/categoryMonths/transactions fetch shape as
  * src/routes/months.ts's computeMonthView — every report here folds

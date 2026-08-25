@@ -291,7 +291,19 @@ export function ReviewImport({
                       )}
                     </td>
                     <td>
-                      {!row.isSplit && !row.transferAccountId && (
+                      {/* Not for a split parent — its categoryId is null by
+                          construction (the category lives on its unlisted
+                          children) and a manually-created split is always
+                          already approved; imports never produce one, so
+                          this case is dead in practice, not just skipped.
+                          A transfer leg has no category either, but IS
+                          commonly unapproved straight out of import — the
+                          PATCH endpoint and "Approve all" both handle it
+                          like any other row (drafts[row.id] is simply
+                          empty, so this sends categoryId: null), so hiding
+                          the per-row button here would only take away a
+                          working path, not guard a broken one. */}
+                      {!row.isSplit && (
                         <>
                           <button onClick={() => approve([row.id])} disabled={busy}>
                             {row.approved ? 'Save' : 'Approve'}

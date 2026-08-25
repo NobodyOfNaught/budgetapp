@@ -1197,6 +1197,45 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 23 — Import-undo cascades like a single delete already did
+
+`DELETE /transactions/:id` has always gone through `softDeleteTransactionCascade`
+(`src/budget/transactions.ts`), which correctly reaches a transfer's sibling leg
+(wherever it lives — a different account, a different import), a carved-out transfer
+fee, and a split's children. `DELETE /imports/:batchId` — undoing an import — never
+did: it was a bare `UPDATE transactions SET deleted_at = ? WHERE import_batch_id = ?`,
+blind to `transferTransactionId`, `feeForTransactionId`, and `approved` alike.
+
+That's a real gap, not a theoretical one — it surfaced from an actual account in this
+budget. Two rows imported from separate statements (a bank checking account, a credit
+card) get linked after the fact via `link-transfer`, which is exactly what that
+endpoint is for. Undo the checking import alone under the old code and the card row
+was left with a `transferTransactionId` pointing at nothing. The ledger doesn't
+actually break — it only reads the surviving leg's own `transferTransactionId !==
+null` and `transferAccountId`, never re-validates the counterpart exists — but
+`link-transfer`'s auto-set payment-category assignment is never cleared, so the
+surviving leg keeps "paying down" a card transfer that no longer exists, permanently,
+with nothing in the UI to explain why. A carved-out fee row hits the same kind of
+orphaning.
+
+Fixed by running every batch row through `softDeleteTransactionCascade` instead of the
+bulk UPDATE — the function already handles all of this, undo just wasn't using it.
+Made idempotent-safe first (it already bailed on an already-deleted row, but now
+explicitly returns the list of ids it actually deleted, primary plus cascade, rather
+than a bare boolean) so a batch containing BOTH legs of one transfer doesn't do
+double work when the loop reaches the second leg. The route diffs that list against
+the batch's own row ids to report `removedOutsideBatch` — cascading past the batch
+boundary is correct (the alternative is the dangling reference above), but silent is
+the wrong way to do it, so the response — and now the confirm dialog and a post-undo
+note in `ImportForm.tsx` — say when it happens. `approvedRemoved` closes the other
+half: an already-reviewed, already-confirmed transaction was always removed exactly
+like an unapproved one (undo means undo), just with zero indication that's what
+happened; now the response names how many.
+
+No schema change. Golden case added: two accounts, two separate imports, linked via
+`link-transfer`, undo one side — asserts the other account's row is gone too, not
+dangling, and the response reports it.
+
 ### PR 22 — Daily net worth, exact-day ranges, and a running average
 
 PR 21 gave net worth a graph but kept it monthly-only — asked directly for *daily* net worth

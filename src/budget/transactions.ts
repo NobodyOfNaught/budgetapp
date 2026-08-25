@@ -231,13 +231,25 @@ export async function insertTransferPair(
 
 /**
  * Soft-deletes a transaction and cascades to whatever it's structurally
- * tied to: a split parent's children, or a transfer's sibling leg. Deleting
- * a split child directly (bypassing its parent) is left unguarded — the UI
- * never does this, only whole-transaction delete on the parent.
+ * tied to: a split parent's children, a carved-out fee row, or a transfer's
+ * sibling leg — wherever that sibling lives, including a different account
+ * or a different import batch entirely. Deleting a split child directly
+ * (bypassing its parent) is left unguarded — the UI never does this, only
+ * whole-transaction delete on the parent.
+ *
+ * Returns every transaction id actually transitioned to deleted — the
+ * primary one plus whatever cascaded — so a caller working through many
+ * rows at once (see the import-undo route) can tell which of those were
+ * incidental: a sibling this call reached but the caller never asked for.
+ * Idempotent: called again on an already-deleted id, it does nothing and
+ * returns an empty list — the exact case a batch containing BOTH legs of
+ * one transfer hits, since the first call already cascaded to the second.
  */
-export async function softDeleteTransactionCascade(db: Db, transactionId: string, now: number): Promise<boolean> {
+export async function softDeleteTransactionCascade(db: Db, transactionId: string, now: number): Promise<string[]> {
   const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId)).limit(1);
-  if (!row || row.deletedAt !== null) return false;
+  if (!row || row.deletedAt !== null) return [];
+
+  const deletedIds = [transactionId];
 
   const children = await db
     .select({ id: transactions.id })
@@ -245,6 +257,7 @@ export async function softDeleteTransactionCascade(db: Db, transactionId: string
     .where(eq(transactions.parentTransactionId, transactionId));
   for (const child of children) {
     await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, child.id));
+    deletedIds.push(child.id);
   }
 
   // A fee carved out of this row when it was linked as a transfer (see
@@ -257,6 +270,7 @@ export async function softDeleteTransactionCascade(db: Db, transactionId: string
     .where(eq(transactions.feeForTransactionId, transactionId));
   for (const fee of fees) {
     await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, fee.id));
+    deletedIds.push(fee.id);
   }
 
   await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, transactionId));
@@ -269,8 +283,9 @@ export async function softDeleteTransactionCascade(db: Db, transactionId: string
       .limit(1);
     if (sibling && sibling.deletedAt === null) {
       await db.update(transactions).set({ deletedAt: now, updatedAt: now }).where(eq(transactions.id, sibling.id));
+      deletedIds.push(sibling.id);
     }
   }
 
-  return true;
+  return deletedIds;
 }

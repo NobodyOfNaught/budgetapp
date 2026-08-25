@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
 import { loadActivePayeeRules } from '../budget/payee-rules';
 import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
-import { insertTransaction, insertTransferPair } from '../budget/transactions';
+import { insertTransaction, insertTransferPair, softDeleteTransactionCascade } from '../budget/transactions';
 import { getDb, type Db } from '../db/client';
 import { accounts, budgets, categories, importBatches, payees, transactions } from '../db/schema';
 import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName, type ImportProvider } from '../import';
@@ -670,6 +670,21 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
 });
 
 /** Undoes a whole import. Import writes real rows, so this is the escape hatch when a file turns out to be wrong. */
+// Undoing an import used to be a single blunt UPDATE keyed on
+// import_batch_id — nothing softDeleteTransactionCascade already does for
+// an ordinary single-transaction delete. That meant undoing a batch could
+// leave a transfer sibling living outside it (a different account, a
+// different import, even a manually-entered row) with a
+// transferTransactionId pointing at nothing: the ledger still reads fine
+// off the sibling's OWN transferAccountId/transferTransactionId-not-null,
+// so balances and Ready to Assign don't break, but a payment category
+// link-transfer set on it never gets cleared (it keeps "paying down" a
+// card transfer that no longer exists), a carved-out transfer fee is left
+// stranded with nothing to belong to, and the Review screen's "linked to"
+// detail silently goes blank. Running every batch row through the same
+// cascade the single-transaction delete already uses closes all three —
+// including reaching outside the batch when a sibling lives there, exactly
+// like deleting either leg by hand already does.
 importsRoute.delete('/:batchId', requireBudgetMember('editor'), async (c) => {
   const budgetId = budgetIdParam(c);
   const batchId = c.req.param('batchId');
@@ -682,14 +697,29 @@ importsRoute.delete('/:batchId', requireBudgetMember('editor'), async (c) => {
     .limit(1);
   if (!batch) return c.json({ error: 'not_found' }, 404);
 
-  const now = Date.now();
-  await db
-    .update(transactions)
-    .set({ deletedAt: now, updatedAt: now })
+  const batchRows = await db
+    .select({ id: transactions.id, approved: transactions.approved })
+    .from(transactions)
     .where(and(eq(transactions.budgetId, budgetId), eq(transactions.importBatchId, batchId), isNull(transactions.deletedAt)));
+  const batchIds = new Set(batchRows.map((r) => r.id));
+  const approvedRemoved = batchRows.filter((r) => r.approved).length;
+
+  const now = Date.now();
+  const allDeleted = new Set<string>();
+  for (const row of batchRows) {
+    // Idempotent — a row already reached by an earlier iteration's cascade
+    // (both legs of one transfer, both in this same batch) is a no-op here.
+    for (const id of await softDeleteTransactionCascade(db, row.id, now)) allDeleted.add(id);
+  }
   await db.update(importBatches).set({ deletedAt: now }).where(eq(importBatches.id, batchId));
 
-  return c.json({ status: 'ok' });
+  // Reached only because a batch row cascaded to it — a transfer sibling
+  // (or its fee) that this import never added. Named "outside this batch"
+  // rather than "cross-account" since it's occasionally the same account
+  // under a different import, not only a different one.
+  const removedOutsideBatch = [...allDeleted].filter((id) => !batchIds.has(id)).length;
+
+  return c.json({ status: 'ok', removed: allDeleted.size, approvedRemoved, removedOutsideBatch });
 });
 
 async function findCategoryIdByName(db: Db, budgetId: string, name: string): Promise<string | null> {

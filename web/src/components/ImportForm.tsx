@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 import { IMPORT_PROVIDER_OPTIONS } from '../providers';
-import type { Account, BudgetDetail, ImportBatch, ImportSummary } from '../types';
+import type { Account, BudgetDetail, ImportBatch, ImportSummary, UndoImportResult } from '../types';
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
 function savedMembers(account: Account | undefined): string[] {
@@ -94,6 +94,11 @@ export function ImportForm({
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [history, setHistory] = useState<ImportBatch[] | null>(null);
   const [undoingId, setUndoingId] = useState<string | null>(null);
+  // What the last undo actually removed — shown once, next to whichever
+  // Undo button was clicked, since removed can exceed the batch's own row
+  // count (a transfer sibling outside the batch cascades too; see
+  // softDeleteTransactionCascade). Cleared on the next undo attempt.
+  const [undoResult, setUndoResult] = useState<UndoImportResult | null>(null);
   // Providers whose file has no fixed participant list of its own
   // (Splitwise) report who's in it via POST /imports/inspect, so the user
   // can pick which people's expenses belong to THIS budget before
@@ -234,10 +239,17 @@ export function ImportForm({
   }
 
   async function handleUndo(batchId: string) {
-    if (!window.confirm('Undo this import? Every transaction it added will be removed.')) return;
+    // Can't name a count here — whether this reaches outside the batch
+    // (a transfer sibling elsewhere) isn't known until the delete actually
+    // runs; see undoResult below for what it turns out to have been.
+    if (!window.confirm('Undo this import? Every transaction it added will be removed — including a linked transfer’s other leg, if one exists outside this import.')) {
+      return;
+    }
     setUndoingId(batchId);
+    setUndoResult(null);
     try {
-      await apiFetch(`/budgets/${budgetId}/imports/${batchId}`, { method: 'DELETE' });
+      const result = await apiFetch<UndoImportResult>(`/budgets/${budgetId}/imports/${batchId}`, { method: 'DELETE' });
+      setUndoResult(result);
       loadHistory();
       onUndone();
     } finally {
@@ -245,9 +257,29 @@ export function ImportForm({
     }
   }
 
+  // What the DELETE actually did, in plain terms — placed wherever an Undo
+  // button lives (the summary panel below, or this history table), since
+  // "removed" can legitimately exceed the batch's own row count once a
+  // transfer sibling outside it cascades too.
+  const undoResultNote = undoResult && (
+    <p style={{ color: '#666', fontSize: '0.9em' }}>
+      Removed {undoResult.removed} transaction{undoResult.removed === 1 ? '' : 's'}
+      {undoResult.approvedRemoved > 0 && <> — {undoResult.approvedRemoved} already approved</>}
+      {undoResult.removedOutsideBatch > 0 && (
+        <>
+          {' '}
+          — including {undoResult.removedOutsideBatch} linked to this import from{' '}
+          {undoResult.removedOutsideBatch === 1 ? 'a transaction outside it' : 'transactions outside it'}
+        </>
+      )}
+      .
+    </p>
+  );
+
   const historyPanel = history !== null && history.length > 0 && (
     <div style={{ marginTop: '1rem' }}>
       <h3 style={{ marginBottom: '0.5rem' }}>Recent imports</h3>
+      {undoResultNote}
       <div className="table-scroll">
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
@@ -320,6 +352,7 @@ export function ImportForm({
             {undoingId === summary.batchId ? 'Undoing…' : 'Undo this import'}
           </button>
         </p>
+        {undoResultNote}
         <button type="button" onClick={onCancel}>
           Done
         </button>

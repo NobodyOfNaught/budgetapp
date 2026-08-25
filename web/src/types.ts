@@ -259,6 +259,19 @@ export interface ImportBatch {
   createdAt: number;
 }
 
+/**
+ * DELETE .../imports/:batchId's response. `removed` can exceed the
+ * batch's own row count — undoing cascades to a transfer sibling (or its
+ * carved-out fee) wherever it lives, including outside this batch, the
+ * same way deleting either leg by hand already does. `removedOutsideBatch`
+ * is how many of those there were.
+ */
+export interface UndoImportResult {
+  removed: number;
+  approvedRemoved: number;
+  removedOutsideBatch: number;
+}
+
 /** One row awaiting review — imported but not yet approved. */
 export interface ReviewTransaction {
   id: string;

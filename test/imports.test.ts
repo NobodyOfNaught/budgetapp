@@ -34,6 +34,27 @@ const TIM_HORTONS_CAD =
   '"CARD_TRANSACTION-9000000001",COMPLETED,OUT,"2026-08-05 08:00:00","2026-08-05 08:00:00",0.00,CAD,,,' +
   '"Palle Helenius",100.00,CAD,"Tim Hortons",100.00,CAD,1.0000000000000000,,,"Palle Helenius",Groceries,';
 
+// A same-currency, uncategorized pair for exercising link-transfer across
+// two SEPARATE imports/accounts — an empty Category (unlike the rows
+// above) so neither lands pre-categorized, since link-transfer refuses a
+// categorized leg. One outflow, one matching inflow; not the same
+// CARD_TRANSACTION id, since these are meant to be two independently
+// imported rows a user links by hand, not one purchase Wise already
+// grouped.
+const CHK_XFER_OUT =
+  '"CARD_TRANSACTION-CHKXFER0001",COMPLETED,OUT,"2026-03-20 10:00:00","2026-03-20 10:00:00",0.00,USD,,,' +
+  '"Palle Helenius",50.00,USD,"Neo Mastercard Payment",50.00,USD,1.0000000000000000,,,"Palle Helenius",,';
+const CC_XFER_IN =
+  '"CARD_TRANSACTION-CCXFER00001",COMPLETED,IN,"2026-03-20 10:00:00","2026-03-20 10:00:00",0.00,USD,,,' +
+  '"Checking Payment",50.00,USD,"Palle Helenius",50.00,USD,1.0000000000000000,,,"Palle Helenius",,';
+
+// A second, distinct USD purchase alongside GIANT_FOOD — same shape, no
+// category — just for a two-row batch where the rows' fates diverge (one
+// approved before undo, one not).
+const SECOND_USD =
+  '"CARD_TRANSACTION-SECONDUSD01",COMPLETED,OUT,"2026-07-28 09:00:00","2026-07-28 09:00:00",0.00,USD,,,' +
+  '"Palle Helenius",20.00,USD,"Coffee Shop",20.00,USD,1.0000000000000000,,,"Palle Helenius",,';
+
 function csv(...rows: string[]): string {
   return [HEADER, ...rows, ''].join('\n');
 }
@@ -404,14 +425,35 @@ describe('GET /imports', () => {
   });
 });
 
+interface UndoImportResult {
+  status: string;
+  removed: number;
+  approvedRemoved: number;
+  removedOutsideBatch: number;
+}
+
 describe('DELETE /imports/:batchId', () => {
   it('undoes the whole import', async () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('import-undo@example.com');
     const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
     const { body } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD, SPLIT_CAD, SPLIT_USD));
 
-    const { status } = await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/${body.batchId}`, { method: 'DELETE' });
+    const { status, body: undone } = await callJson<UndoImportResult>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/${body.batchId}`,
+      { method: 'DELETE' },
+    );
     expect(status).toBe(200);
+    // GIANT_FOOD (1 transaction) + SPLIT_CAD/SPLIT_USD's purchase (1) +
+    // the conversion transfer THAT purchase pulls in to fund it, which is
+    // 2 real transaction rows (one per leg — see insertTransferPair) even
+    // though the parser counts it as one parsed row. The transfer's own
+    // sibling leg is IN this same batch, so it's removed by the normal
+    // walk, not counted as "outside" it.
+    expect(undone.removed).toBe(4);
+    expect(undone.approvedRemoved).toBe(0);
+    expect(undone.removedOutsideBatch).toBe(0);
     expect(await review(app, sessionCookie, budgetId)).toHaveLength(0);
 
     const { body: register } = await callJson<{ accountBalance: number }>(
@@ -420,6 +462,85 @@ describe('DELETE /imports/:batchId', () => {
       `/api/v1/budgets/${budgetId}/accounts/${account.account.id}/transactions`,
     );
     expect(register.accountBalance).toBe(0);
+  });
+
+  it('cascades to a transfer sibling living outside this batch, instead of leaving it dangling', async () => {
+    // The gap this closes: undo used to be a bare UPDATE keyed on
+    // import_batch_id, which never looked at transferTransactionId at all.
+    // A transfer linked AFTER both legs were already imported separately —
+    // exactly what link-transfer exists for — left the surviving leg
+    // pointing at a deleted row once its own batch was undone: the ledger
+    // still reads fine off the surviving leg's own fields, but its
+    // auto-set payment-category link never got cleared, and it kept
+    // "paying down" a card transfer that no longer existed.
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-undo-transfer@example.com');
+    const checking = await createAccount(app, sessionCookie, budgetId, { name: 'Checking', type: 'checking' });
+    const card = await createAccount(app, sessionCookie, budgetId, { name: 'Card', type: 'credit_card' });
+
+    const { body: checkingBatch } = await importCsv(app, sessionCookie, budgetId, checking.account.id, csv(CHK_XFER_OUT));
+    await importCsv(app, sessionCookie, budgetId, card.account.id, csv(CC_XFER_IN));
+
+    const rows = await review(app, sessionCookie, budgetId);
+    const checkingRow = rows.find((r) => r.accountName === 'Checking')!;
+    const cardRow = rows.find((r) => r.accountName === 'Card')!;
+
+    const { body: linked } = await callJson<{ paymentCategoryId: string | null }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/transactions/${checkingRow.id}/link-transfer`,
+      { method: 'POST', body: JSON.stringify({ otherTransactionId: cardRow.id }) },
+    );
+    expect(linked.paymentCategoryId).not.toBeNull(); // auto-categorized as a card payment — see link-transfer
+
+    // Undo only the CHECKING import. The card row came from a separate
+    // batch entirely — this is the case a bare batch-id UPDATE can't reach.
+    const { status, body: undone } = await callJson<UndoImportResult>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/${checkingBatch.batchId}`,
+      { method: 'DELETE' },
+    );
+    expect(status).toBe(200);
+    expect(undone.removed).toBe(2); // the checking row plus the card row it cascaded to
+    expect(undone.removedOutsideBatch).toBe(1); // the card row wasn't part of this batch
+
+    // Both legs are actually gone — not just the one this batch itself added.
+    const { body: cardRegister } = await callJson<{ accountBalance: number; transactions: { id: string }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/accounts/${card.account.id}/transactions`,
+    );
+    expect(cardRegister.transactions.find((t) => t.id === cardRow.id)).toBeUndefined();
+    expect(cardRegister.accountBalance).toBe(0);
+  });
+
+  it('removes an already-approved row the same as an unapproved one, and reports how many', async () => {
+    // The other half of the same gap: undo never looked at `approved`
+    // either, so a row the user had already reviewed and confirmed
+    // vanished with zero distinction from one still sitting in the queue.
+    // Still removed — undo means undo — but now the response says so.
+    const { app, sessionCookie, budgetId } = await signInNewUser('import-undo-approved@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    const { body } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD, SECOND_USD));
+
+    const rows = await review(app, sessionCookie, budgetId);
+    expect(rows).toHaveLength(2);
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/imports/review`, {
+      method: 'PATCH',
+      body: JSON.stringify({ updates: [{ transactionId: rows[0]!.id, categoryId: rows[0]!.categoryId, approved: true }] }),
+    });
+
+    const { status, body: undone } = await callJson<UndoImportResult>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports/${body.batchId}`,
+      { method: 'DELETE' },
+    );
+    expect(status).toBe(200);
+    expect(undone.removed).toBe(2);
+    expect(undone.approvedRemoved).toBe(1);
+    expect(undone.removedOutsideBatch).toBe(0);
+    expect(await review(app, sessionCookie, budgetId, true)).toHaveLength(0); // gone, approved or not
   });
 
   it('re-importing the same file to the same account after an undo succeeds cleanly — regression for the soft-deleted-row unique-index bug', async () => {

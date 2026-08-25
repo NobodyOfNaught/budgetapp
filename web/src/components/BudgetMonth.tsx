@@ -103,6 +103,40 @@ interface FlatCategory {
   groupName: string;
 }
 
+interface ColumnTotals {
+  assignedMinor: number;
+  activityMinor: number;
+  availableMinor: number;
+  /** Sum of neededMinor across only the categories actually SHOWING a
+   * number in that column — 'funded' and 'building' render text, not an
+   * amount (see the Needed cell below), so folding their neededMinor in
+   * here would total a figure nobody sees on screen. */
+  neededMinor: number;
+}
+
+/** Sums Assigned/Activity/Available/Needed over one set of category rows —
+ * shared by each group's subtotal and the grand total, so the two can
+ * never disagree about what counts. `rows` is whatever's already been
+ * filtered for display (hidden/income exclusions), same amounts each row
+ * itself renders from `view`/`targets`. */
+function sumColumnTotals(rows: { id: string }[], view: MonthView | null): ColumnTotals {
+  let assignedMinor = 0;
+  let activityMinor = 0;
+  let availableMinor = 0;
+  let neededMinor = 0;
+  for (const c of rows) {
+    const amounts = view?.categories[c.id];
+    if (amounts) {
+      assignedMinor += amounts.assigned;
+      activityMinor += amounts.activity;
+      availableMinor += amounts.available;
+    }
+    const target = view?.targets[c.id];
+    if (target?.status === 'short') neededMinor += target.neededMinor;
+  }
+  return { assignedMinor, activityMinor, availableMinor, neededMinor };
+}
+
 export function BudgetMonth({
   budgetId,
   categoryGroups,
@@ -382,6 +416,29 @@ export function BudgetMonth({
 
         <UpcomingPanel budgetId={budgetId} refreshToken={targetsVersion} />
 
+        {/* Computed once, up front, rather than inline in the JSX map
+            below — the group subtotal row and the grand-total footer both
+            need the same filtered row set, and this is the one place that
+            decides what's visible at all (hidden/income exclusions), same
+            rule as before this totals feature existed. */}
+        {(() => {
+          const visibleGroups = categoryGroups
+            .map((group) => ({
+              group,
+              rows: group.categories.filter((c) => c.kind !== 'income' && (showHidden || !c.hiddenAt)),
+              nonIncomeCount: group.categories.filter((c) => c.kind !== 'income').length,
+            }))
+            // A genuinely empty group (nonIncomeCount === 0 — e.g. just
+            // created) always shows, so it can be used at all. A group
+            // whose categories are all hidden collapses away when
+            // showHidden is off.
+            .filter(({ rows, nonIncomeCount }) => rows.length > 0 || nonIncomeCount === 0);
+          const grandTotals = sumColumnTotals(
+            visibleGroups.flatMap((g) => g.rows),
+            view,
+          );
+
+          return (
         <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -395,14 +452,8 @@ export function BudgetMonth({
               </tr>
             </thead>
             <tbody>
-              {categoryGroups.map((group) => {
-                const rows = group.categories.filter((c) => c.kind !== 'income' && (showHidden || !c.hiddenAt));
-                const nonIncomeCount = group.categories.filter((c) => c.kind !== 'income').length;
-                // A genuinely empty group (nonIncomeCount === 0 — e.g. just
-                // created) always shows, so it can be used at all. A group
-                // whose categories are all hidden collapses away when
-                // showHidden is off, same as before this PR.
-                if (rows.length === 0 && nonIncomeCount > 0) return null;
+              {visibleGroups.map(({ group, rows }) => {
+                const totals = sumColumnTotals(rows, view);
                 return (
                   <Fragment key={group.id}>
                     <tr>
@@ -574,12 +625,46 @@ export function BudgetMonth({
                         </Fragment>
                       );
                     })}
+                    {rows.length > 0 && (
+                      <tr style={{ borderTop: '1px solid #ccc', fontWeight: 'bold' }}>
+                        <td>{group.name} total</td>
+                        <td align="right">{formatMinor(totals.assignedMinor)}</td>
+                        <td align="right" style={{ color: amountColor(totals.activityMinor) }}>
+                          {formatMinor(totals.activityMinor)}
+                        </td>
+                        <td align="right" style={{ color: amountColor(totals.availableMinor) }}>
+                          {formatMinor(totals.availableMinor)}
+                        </td>
+                        <td align="right" style={{ color: totals.neededMinor > 0 ? '#c0392b' : '#666' }}>
+                          {formatMinor(totals.neededMinor)}
+                        </td>
+                        <td />
+                      </tr>
+                    )}
                   </Fragment>
                 );
               })}
             </tbody>
+            <tfoot>
+              <tr style={{ borderTop: '2px solid #333', fontWeight: 'bold' }}>
+                <td>Budget total</td>
+                <td align="right">{formatMinor(grandTotals.assignedMinor)}</td>
+                <td align="right" style={{ color: amountColor(grandTotals.activityMinor) }}>
+                  {formatMinor(grandTotals.activityMinor)}
+                </td>
+                <td align="right" style={{ color: amountColor(grandTotals.availableMinor) }}>
+                  {formatMinor(grandTotals.availableMinor)}
+                </td>
+                <td align="right" style={{ color: grandTotals.neededMinor > 0 ? '#c0392b' : '#666' }}>
+                  {formatMinor(grandTotals.neededMinor)}
+                </td>
+                <td />
+              </tr>
+            </tfoot>
           </table>
         </div>
+          );
+        })()}
 
         {categoryError && <p style={{ color: '#c0392b' }}>{categoryError}</p>}
 

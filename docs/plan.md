@@ -1197,6 +1197,24 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 24 — Group and budget totals on the budget screen
+
+Each category group's table now ends with a bold subtotal row, and the whole table ends
+with a bold "Budget total" row — Assigned/Activity/Available/Needed, summed. Both come
+from one `sumColumnTotals` helper fed the same filtered row set the category rows
+themselves already render from (`view.categories`/`view.targets`), so the totals can't
+disagree with what's on screen above them — no second read of the numbers, no chance of
+drifting from a ledger change elsewhere.
+
+Needed is the one column that isn't simply "sum every row's number": a category shows
+`'✓ funded'` or `'building'` as text, not an amount, when its target isn't in the
+`'short'` state, so a naive sum of every `neededMinor` would total a figure nobody
+actually sees written down next to any row. `sumColumnTotals` only folds in
+`neededMinor` where `status === 'short'`, matching exactly what's numeric on screen.
+
+No schema or API change — this is `MonthView`, already fetched, just aggregated a
+second way in `BudgetMonth.tsx`.
+
 ### PR 23 — Import-undo cascades like a single delete already did
 
 `DELETE /transactions/:id` has always gone through `softDeleteTransactionCascade`

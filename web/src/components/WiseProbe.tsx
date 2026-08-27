@@ -4,15 +4,26 @@ import { apiFetch, ApiError } from '../api';
 /**
  * A throwaway diagnostic panel, not a product feature.
  *
- * Its whole job is to answer one question with real data before the Wise
- * API import path commits to a statement format: do the JSON and CSV
- * statements report the SAME transaction ids? src/import/wise.ts derives
- * importId from the CSV's `ID` column verbatim and imported rows dedupe on
- * the (account_id, import_id) unique index, so if JSON's referenceNumber
- * is a different string, moving to JSON would silently duplicate every row
- * of any overlapping period. It also reports whether this profile triggers
- * SCA on statement reads, which decides whether the RSA signing step needs
- * building at all.
+ * The first run against a real account already settled the two questions
+ * it was built for, and neither answer was the expected one:
+ *
+ * - No SCA. Statement reads succeeded on a bearer token alone, so the RSA
+ *   signing path does not need building for this profile.
+ * - The API's `statement.csv` is NOT the file src/import/wise.ts parses.
+ *   The web-UI export uses `ID`, `Direction`, `Source amount (after fees)`;
+ *   the API uses `TransferWise ID`, `Amount`, `Running Balance`,
+ *   `Transaction Type`. Same filename, different format — so reusing the
+ *   existing CSV parser was never actually an option, and the JSON payload
+ *   (explicit type field, per-row running balance) is the better target.
+ *
+ * What is left is the id question, and it is now a MIGRATION question
+ * rather than a format one: the API reports `CARD-4145111585` where
+ * already-imported history holds `CARD_TRANSACTION-4145111585`. Same
+ * transaction, same number, different prefix — and since rows dedupe on the
+ * (account_id, import_id) unique index, an overlapping fetch would double
+ * every row until that is normalised. Hence the id table below, and the
+ * type/field reporting: the normalisation has to cover every transaction
+ * type, not just the card rows that happen to dominate a sample.
  *
  * The token is typed here, POSTed to our own Worker, used for the read,
  * and discarded — it is never stored, never logged, and never comes back
@@ -20,6 +31,9 @@ import { apiFetch, ApiError } from '../api';
  * the request: real credential storage is a separate, encrypted-at-rest
  * design, and a diagnostic should not quietly become the thing that sets
  * that precedent.
+ *
+ * Reports schema only — field NAMES, type labels, ids and counts. No
+ * amounts, no payees, no merchant names.
  */
 
 interface StatementProbe {
@@ -27,6 +41,8 @@ interface StatementProbe {
   scaRequired: boolean;
   ids: string[];
   headerLine: string | null;
+  fieldNames: string[];
+  types: string[];
   error: string | null;
 }
 
@@ -83,8 +99,9 @@ export function WiseProbe({ budgetId, onCancel }: { budgetId: string; onCancel: 
     <div style={{ border: '1px solid #ccc', padding: '0.75rem', marginTop: '0.5rem' }}>
       <h3 style={{ marginTop: 0 }}>Wise API probe</h3>
       <p style={{ fontSize: '0.85rem', color: '#555', marginTop: 0 }}>
-        Reads a date range from Wise in both JSON and CSV and compares the transaction ids. Nothing is imported and
-        nothing is saved — the token is used for the read and discarded.
+        Reads a date range from Wise in both JSON and CSV and reports their transaction ids, field names and type
+        labels — no amounts or payees. Nothing is imported and nothing is saved; the token is used for the read and
+        discarded.
       </p>
 
       <form onSubmit={run}>
@@ -147,6 +164,21 @@ export function WiseProbe({ budgetId, onCancel }: { budgetId: string; onCancel: 
                   CSV header: <code>{balance.csv.headerLine}</code>
                 </p>
               )}
+              {balance.json.fieldNames.length > 0 && (
+                <p style={{ margin: '0 0 0.15rem', wordBreak: 'break-all', color: '#555' }}>
+                  JSON fields: <code>{balance.json.fieldNames.join(', ')}</code>
+                </p>
+              )}
+              {balance.json.types.length > 0 && (
+                <p style={{ margin: '0 0 0.15rem', color: '#555' }}>
+                  JSON types: <code>{balance.json.types.join(', ')}</code>
+                </p>
+              )}
+              {balance.csv.types.length > 0 && (
+                <p style={{ margin: '0 0 0.15rem', color: '#555' }}>
+                  CSV transaction types: <code>{balance.csv.types.join(', ')}</code>
+                </p>
+              )}
               {(balance.json.ids.length > 0 || balance.csv.ids.length > 0) && (
                 <table style={{ borderCollapse: 'collapse', marginTop: '0.25rem' }}>
                   <thead>
@@ -157,7 +189,7 @@ export function WiseProbe({ budgetId, onCancel }: { budgetId: string; onCancel: 
                   </thead>
                   <tbody>
                     {Array.from({ length: Math.max(balance.json.ids.length, balance.csv.ids.length) })
-                      .slice(0, 10)
+                      .slice(0, 25)
                       .map((_, i) => {
                         const jsonId = balance.json.ids[i] ?? '—';
                         const csvId = balance.csv.ids[i] ?? '—';

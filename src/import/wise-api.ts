@@ -174,7 +174,29 @@ export async function fetchStatement(
 // silently double every row — the hazard the Simplii CSV -> QFX switch hit.
 
 interface WiseJsonStatement {
-  transactions?: { referenceNumber?: string }[];
+  transactions?: Record<string, unknown>[];
+}
+
+/**
+ * The API's CSV calls the id column "TransferWise ID". The web-UI export
+ * this repo's parser was built against calls it "ID" — they are different
+ * files that happen to share a filename, which is exactly the sort of thing
+ * this probe exists to catch. Both names are tried so the probe reports
+ * something useful whichever file it is pointed at.
+ */
+const CSV_ID_COLUMNS = ['TransferWise ID', 'ID'] as const;
+
+function csvId(record: Record<string, string>): string {
+  for (const column of CSV_ID_COLUMNS) {
+    const value = record[column];
+    if (value) return value;
+  }
+  return '';
+}
+
+/** Distinct values of a field, in first-seen order, so the parser can be written against the real set of transaction types rather than a guess at it. */
+function distinct(values: string[]): string[] {
+  return [...new Set(values.filter((v) => v !== ''))];
 }
 
 /** What a single format returned for one balance: the ids it reported, or why it could not be read. */
@@ -185,6 +207,14 @@ export interface StatementProbe {
   ids: string[];
   /** For CSV, the header line verbatim — the parser binds to these exact column names, so drift is worth seeing. */
   headerLine: string | null;
+  /**
+   * Field NAMES present on the first row (JSON) — schema, not data. Needed
+   * to write the parser against the real payload shape; deliberately no
+   * values, so no amounts or payees leave the account.
+   */
+  fieldNames: string[];
+  /** Distinct transaction-type values seen. A type label is a category name, not financial data, and it is what replaces the parser's name-matching heuristic. */
+  types: string[];
   error: string | null;
 }
 
@@ -203,27 +233,53 @@ export interface WiseProbeResult {
 }
 
 function probeJson(response: WiseResponse): StatementProbe {
-  const base = { status: response.status, scaRequired: response.scaChallenge !== null, headerLine: null };
+  const base = {
+    status: response.status,
+    scaRequired: response.scaChallenge !== null,
+    headerLine: null,
+    fieldNames: [],
+    types: [],
+  };
   if (response.status !== 200) {
     return { ...base, ids: [], error: response.body.slice(0, 300) };
   }
   try {
     const parsed = JSON.parse(response.body) as WiseJsonStatement;
-    const ids = (parsed.transactions ?? []).map((t) => t.referenceNumber ?? '');
-    return { ...base, ids, error: null };
+    const rows = parsed.transactions ?? [];
+    const first = rows[0];
+    return {
+      ...base,
+      ids: rows.map((row) => String(row['referenceNumber'] ?? '')),
+      // Nested objects (amount, runningBalance, exchangeDetails, ...) are
+      // shown one level deep so the shape is legible without dumping values.
+      fieldNames: first
+        ? Object.entries(first).flatMap(([key, value]) =>
+            value !== null && typeof value === 'object' && !Array.isArray(value)
+              ? Object.keys(value as Record<string, unknown>).map((inner) => `${key}.${inner}`)
+              : [key],
+          )
+        : [],
+      types: distinct(rows.map((row) => String(row['type'] ?? ''))),
+      error: null,
+    };
   } catch {
     return { ...base, ids: [], error: 'non-JSON body' };
   }
 }
 
 function probeCsv(response: WiseResponse): StatementProbe {
-  const scaRequired = response.scaChallenge !== null;
+  const base = { status: response.status, scaRequired: response.scaChallenge !== null, fieldNames: [] };
   if (response.status !== 200) {
-    return { status: response.status, scaRequired, ids: [], headerLine: null, error: response.body.slice(0, 300) };
+    return { ...base, ids: [], headerLine: null, types: [], error: response.body.slice(0, 300) };
   }
-  const headerLine = response.body.split('\n', 1)[0] ?? null;
-  const ids = parseCsvRecords(response.body).map((record) => record['ID'] ?? '');
-  return { status: response.status, scaRequired, ids, headerLine, error: null };
+  const records = parseCsvRecords(response.body);
+  return {
+    ...base,
+    ids: records.map(csvId),
+    headerLine: response.body.split('\n', 1)[0] ?? null,
+    types: distinct(records.map((record) => record['Transaction Type'] ?? '')),
+    error: null,
+  };
 }
 
 /**

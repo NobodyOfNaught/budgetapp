@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 
 /**
@@ -12,10 +12,17 @@ import { apiFetch, ApiError } from '../api';
  * keep in step. The server side stops at "here is the file" for the same
  * reason (see POST /imports/wise/fetch).
  *
- * The token is typed here, used for the one request, and dropped. It is
- * not stored — a Wise token identifies one person's account, and this app
- * is multi-user, so it cannot live in a Worker secret. Persisted
- * per-connection credentials are a separate piece of work.
+ * A credential reaches the fetch one of two ways. Typed here, it is used
+ * for the one request and dropped. Saved, it lives as an encrypted row
+ * scoped to this budget (src/routes/import-connections.ts) — never in a
+ * Worker secret, because those are one global value and a Wise token
+ * identifies one person's bank account.
+ *
+ * A saved connection is what makes the one-click refresh possible: no
+ * token to paste, and no dates either, since the server derives the range
+ * from what has already been imported. The credential is write-only, so
+ * this component can display that a connection exists but can never show
+ * or recover the token behind it.
  */
 
 interface FetchedBalance {
@@ -26,10 +33,20 @@ interface FetchedBalance {
   openingBalance: string | null;
 }
 
+interface Connection {
+  id: string;
+  provider: string;
+  label: string;
+  lastUsedAt: number | null;
+}
+
 interface FetchedStatement {
   statementJson: string;
   balances: FetchedBalance[];
   profileId: number;
+  /** The range the server actually used, which may have been derived rather than requested. */
+  start: string;
+  end: string;
 }
 
 export function WiseFetchPanel({
@@ -47,24 +64,98 @@ export function WiseFetchPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<FetchedStatement | null>(null);
+  const [connections, setConnections] = useState<Connection[] | null>(null);
+  const [keyConfigured, setKeyConfigured] = useState(true);
+  const [saveLabel, setSaveLabel] = useState('');
+
+  const saved = connections?.find((connection) => connection.provider === 'wise_json') ?? null;
+
+  async function loadConnections() {
+    try {
+      const listed = await apiFetch<{ connections: Connection[]; credentialsKeyConfigured: boolean }>(
+        `/budgets/${budgetId}/import-connections`,
+      );
+      setConnections(listed.connections);
+      setKeyConfigured(listed.credentialsKeyConfigured);
+    } catch {
+      // A viewer, or an environment without the table — either way the
+      // panel still works with a typed token, so this is not an error to
+      // put in front of the user.
+      setConnections([]);
+    }
+  }
+
+  useEffect(() => {
+    void loadConnections();
+    // Deliberately keyed on budgetId alone: the list is refreshed
+    // explicitly after saving or forgetting a connection, so re-running on
+    // every render of loadConnections would be churn, not correctness.
+  }, [budgetId]);
 
   const canRun = token.trim() !== '' && start !== '' && end !== '' && start <= end;
 
-  async function run() {
+  /**
+   * `useSaved` runs against the stored connection and lets the server pick
+   * the dates; otherwise the typed token and the typed range are used.
+   * Dates are omitted rather than sent blank so the server can tell "no
+   * preference" from "this exact day".
+   */
+  async function run(useSaved: boolean) {
     setBusy(true);
     setError(null);
     setResult(null);
     try {
+      const body = useSaved
+        ? { connectionId: saved?.id }
+        : { token: token.trim(), start, end };
       const fetched = await apiFetch<FetchedStatement>(`/budgets/${budgetId}/imports/wise/fetch`, {
         method: 'POST',
-        body: JSON.stringify({ token: token.trim(), start, end }),
+        body: JSON.stringify(body),
       });
       setResult(fetched);
       setToken('');
+      if (useSaved) void loadConnections(); // refresh "last used"
       onFetched(
-        new File([fetched.statementJson], `wise-${start}-to-${end}.json`, { type: 'application/json' }),
+        new File([fetched.statementJson], `wise-${fetched.start}-to-${fetched.end}.json`, {
+          type: 'application/json',
+        }),
         'wise_json',
       );
+    } catch (err) {
+      setError(err instanceof ApiError ? JSON.stringify(err.body) : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveConnection() {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch(`/budgets/${budgetId}/import-connections`, {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: 'wise_json',
+          label: saveLabel.trim() || 'Wise',
+          credential: token.trim(),
+        }),
+      });
+      setToken('');
+      setSaveLabel('');
+      await loadConnections();
+    } catch (err) {
+      setError(err instanceof ApiError ? JSON.stringify(err.body) : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forgetConnection(id: string) {
+    if (!confirm('Forget this saved Wise token? Fetching will need it pasted again.')) return;
+    setBusy(true);
+    try {
+      await apiFetch(`/budgets/${budgetId}/import-connections/${id}`, { method: 'DELETE' });
+      await loadConnections();
     } catch (err) {
       setError(err instanceof ApiError ? JSON.stringify(err.body) : String(err));
     } finally {
@@ -75,9 +166,25 @@ export function WiseFetchPanel({
   if (!open) {
     return (
       <p style={{ margin: '0.5rem 0' }}>
-        <button type="button" onClick={() => setOpen(true)}>
-          Fetch from Wise API instead
+        {saved && (
+          <>
+            <button type="button" onClick={() => void run(true)} disabled={busy}>
+              {busy ? 'Fetching…' : 'Fetch new Wise transactions'}
+            </button>{' '}
+          </>
+        )}
+        <button type="button" onClick={() => setOpen(true)} disabled={busy}>
+          {saved ? 'Wise options' : 'Fetch from Wise API instead'}
         </button>
+        {error && (
+          <span style={{ color: '#b00', marginLeft: '0.5rem', wordBreak: 'break-all' }}>{error}</span>
+        )}
+        {result && (
+          <span style={{ color: '#161', marginLeft: '0.5rem' }}>
+            Fetched {result.balances.reduce((sum, b) => sum + b.rowCount, 0)} transactions ({result.start} to{' '}
+            {result.end}) — pick the account below and import.
+          </span>
+        )}
       </p>
     );
   }
@@ -95,10 +202,34 @@ export function WiseFetchPanel({
           the OUTER form natively, reloading the page and never running the
           fetch. Hence a plain div, an explicit type="button", and the
           validation that `required` would otherwise have done. */}
+      {saved && (
+        <div style={{ marginBottom: '0.75rem' }}>
+          <p style={{ margin: '0 0 0.25rem' }}>
+            Saved token: <strong>{saved.label}</strong>{' '}
+            <span style={{ color: '#555' }}>
+              {saved.lastUsedAt
+                ? `· last used ${new Date(saved.lastUsedAt).toLocaleString(undefined, { dateStyle: 'medium' })}`
+                : '· never used'}
+            </span>
+          </p>
+          <button type="button" onClick={() => void run(true)} disabled={busy}>
+            {busy ? 'Fetching…' : 'Fetch new transactions'}
+          </button>{' '}
+          <button type="button" onClick={() => void forgetConnection(saved.id)} disabled={busy}>
+            Forget it
+          </button>
+          <p style={{ margin: '0.25rem 0 0', color: '#555' }}>
+            Fetching with the saved token picks its own dates: from the newest Wise transaction already imported, up
+            to today. It overlaps that last day on purpose — re-importing a day already held changes nothing, while
+            starting a day later would silently miss anything that posted after the last fetch ran.
+          </p>
+        </div>
+      )}
+
       <div>
         <div>
           <label>
-            Wise API token{' '}
+            {saved ? 'Replace token, or fetch a specific range' : 'Wise API token'}{' '}
             <input
               type="password"
               value={token}
@@ -117,8 +248,8 @@ export function WiseFetchPanel({
           </label>
         </div>
         <div style={{ marginTop: '0.5rem' }}>
-          <button type="button" onClick={() => void run()} disabled={busy || !canRun}>
-            {busy ? 'Fetching…' : 'Fetch'}
+          <button type="button" onClick={() => void run(false)} disabled={busy || !canRun}>
+            {busy ? 'Fetching…' : 'Fetch this range'}
           </button>{' '}
           <button type="button" onClick={() => setOpen(false)} disabled={busy}>
             Close
@@ -127,6 +258,33 @@ export function WiseFetchPanel({
             <span style={{ marginLeft: '0.5rem', color: '#555' }}>Token and both dates are needed.</span>
           )}
         </div>
+
+        {!saved && keyConfigured && (
+          <div style={{ marginTop: '0.75rem', borderTop: '1px solid #eee', paddingTop: '0.5rem' }}>
+            <label>
+              Save this token as{' '}
+              <input
+                value={saveLabel}
+                onChange={(e) => setSaveLabel(e.target.value)}
+                placeholder="Wise"
+                size={16}
+              />
+            </label>{' '}
+            <button type="button" onClick={() => void saveConnection()} disabled={busy || token.trim() === ''}>
+              Save
+            </button>
+            <p style={{ margin: '0.25rem 0 0', color: '#555' }}>
+              Stored encrypted against this budget, and write-only — it can be replaced or forgotten, but never shown
+              again, including to you. Saving it turns Fetch into a single button with no dates to pick.
+            </p>
+          </div>
+        )}
+        {!keyConfigured && (
+          <p style={{ marginTop: '0.5rem', color: '#555' }}>
+            Saving tokens is unavailable here: this environment has no CREDENTIALS_KEY set, so there is nothing to
+            encrypt them with.
+          </p>
+        )}
       </div>
 
       {error && (

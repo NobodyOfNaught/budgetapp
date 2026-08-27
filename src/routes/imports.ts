@@ -13,10 +13,11 @@ import { cleanPayeeName } from '../import/payee-name';
 import { matchPayeeRule, type PayeeRule } from '../import/rules';
 import { fetchStatementForImport, MAX_STATEMENT_DAYS, probeWiseApi, WiseApiError } from '../import/wise-api';
 import { checkStatementBalance } from '../import/wise-json';
-import { daysBetween } from '../lib/dates';
+import { daysBetween, todayInUtc } from '../lib/dates';
 import { ulid } from '../lib/ids';
 import { convertToBudgetMinor, parseFxRateToMicros } from '../lib/money';
 import { budgetIdParam } from '../lib/params';
+import { loadConnectionSecret, markConnectionUsed } from './import-connections';
 import type { AppEnv } from '../types/hono';
 
 /**
@@ -222,11 +223,70 @@ importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
 });
 
 const wiseFetchSchema = z.object({
-  /** Per call, never persisted — same reasoning as the probe above. */
-  token: z.string().min(1),
-  start: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
-  end: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+  /**
+   * Exactly one credential source. `token` is typed per call and never
+   * stored; `connectionId` names a stored one (see
+   * src/routes/import-connections.ts), which is what makes a one-click
+   * refresh possible.
+   */
+  token: z.string().min(1).optional(),
+  connectionId: z.string().min(1).optional(),
+  /**
+   * Both optional. Omitted, the range is derived from what has already
+   * been imported — see resolveFetchRange, which is the whole point of the
+   * refresh button.
+   */
+  start: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD').optional(),
+  end: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD').optional(),
 });
+
+/**
+ * The date range to fetch when the caller did not name one.
+ *
+ * Starts ON the date of the newest Wise transaction already imported,
+ * not the day after. Re-fetching a day already held is free — rows dedupe
+ * on the (account_id, import_id) unique index and Wise's ids are stable —
+ * whereas starting a day later silently loses anything that posted after
+ * the last import ran on that same day. Given one of those is harmless and
+ * the other is a hole in the ledger, it overlaps deliberately.
+ *
+ * With nothing imported yet there is no last date to work from, so it
+ * falls back to the budget's own import cutoff, and failing that asks the
+ * caller to be explicit rather than guessing at a start of history.
+ */
+async function resolveFetchRange(
+  db: Db,
+  budgetId: string,
+  requested: { start?: string; end?: string },
+): Promise<{ start: string; end: string } | { error: string }> {
+  const end = requested.end ?? todayInUtc();
+  if (requested.start) return { start: requested.start, end };
+
+  const [latest] = await db
+    .select({ date: transactions.date })
+    .from(transactions)
+    .innerJoin(accounts, eq(accounts.id, transactions.accountId))
+    .where(
+      and(
+        eq(transactions.budgetId, budgetId),
+        isNull(transactions.deletedAt),
+        inArray(accounts.importProvider, ['wise', 'wise_json']),
+      ),
+    )
+    .orderBy(desc(transactions.date))
+    .limit(1);
+
+  if (latest?.date) return { start: latest.date, end };
+
+  const [budget] = await db
+    .select({ cutoff: budgets.importCutoffDate })
+    .from(budgets)
+    .where(eq(budgets.id, budgetId))
+    .limit(1);
+  if (budget?.cutoff) return { start: budget.cutoff, end };
+
+  return { error: 'no_start_date' };
+}
 
 /**
  * Downloads a Wise statement over the API and hands it back as file text,
@@ -238,13 +298,44 @@ const wiseFetchSchema = z.object({
  * then applies unchanged and un-duplicated, and a fetch that goes wrong
  * costs nothing because nothing was written.
  *
- * Owner-gated, like the probe: this hands credentials to an external
- * financial service.
+ * Gated on 'editor', not 'owner'. Storing a credential is an owner action
+ * (see src/routes/import-connections.ts); USING one that an owner already
+ * stored is ordinary import work, and an editor never sees the secret —
+ * only its effects. A one-off typed token is likewise the caller's own.
  */
-importsRoute.post('/wise/fetch', requireBudgetMember('owner'), async (c) => {
+importsRoute.post('/wise/fetch', requireBudgetMember('editor'), async (c) => {
   const parsed = wiseFetchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
-  const { token, start, end } = parsed.data;
+  const { token, connectionId, start: wantStart, end: wantEnd } = parsed.data;
+
+  // Exactly one source, checked rather than silently preferring one: being
+  // vague about WHICH credential ran a fetch is not a thing to guess at.
+  if ((token === undefined) === (connectionId === undefined)) {
+    return c.json({ error: 'invalid_body', detail: 'supply exactly one of token or connectionId' }, 400);
+  }
+
+  const db = getDb(c.env);
+  const budgetId = budgetIdParam(c);
+
+  let credential = token;
+  if (connectionId !== undefined) {
+    const loaded = await loadConnectionSecret(db, c.env, budgetId, connectionId);
+    if ('error' in loaded) {
+      const status = loaded.error === 'not_found' ? 404 : 503;
+      return c.json({ error: `connection_${loaded.error}` }, status);
+    }
+    credential = loaded.credential;
+  }
+  if (credential === undefined) return c.json({ error: 'invalid_body' }, 400);
+
+  const range = await resolveFetchRange(db, budgetId, { start: wantStart, end: wantEnd });
+  if ('error' in range) {
+    return c.json(
+      { error: range.error, detail: 'nothing imported yet and no budget cutoff — supply a start date' },
+      400,
+    );
+  }
+  const { start, end } = range;
 
   if (start > end) return c.json({ error: 'invalid_range', detail: 'start must be on or before end' }, 400);
   if (daysBetween(start, end) > MAX_STATEMENT_DAYS) {
@@ -252,8 +343,13 @@ importsRoute.post('/wise/fetch', requireBudgetMember('owner'), async (c) => {
   }
 
   try {
-    const fetched = await fetchStatementForImport(token, start, end, checkStatementBalance);
-    return c.json(fetched);
+    const fetched = await fetchStatementForImport(credential, start, end, checkStatementBalance);
+    // Only after the credential demonstrably worked — a failed fetch has
+    // not "used" the connection in any sense worth recording.
+    if (connectionId !== undefined) await markConnectionUsed(db, connectionId, Date.now());
+    // The resolved range goes back so the UI can name the dates it got
+    // rather than the ones it asked for, which may have been none.
+    return c.json({ ...fetched, start, end });
   } catch (error) {
     if (error instanceof WiseApiError) {
       return c.json({ error: 'wise_request_failed', status: error.status, scaRequired: error.scaChallenge !== null }, 502);

@@ -417,6 +417,38 @@ export const importBatches = sqliteTable(
 // (src/routes/imports.ts). categoryId is optional — BECU carries no
 // category column at all, so a rule is the only way such a row arrives
 // pre-categorized.
+/**
+ * A stored credential for one provider, scoped to a BUDGET rather than to
+ * the deployment. See migrations/0010 for why a Worker secret is the wrong
+ * home for a token that identifies one person's bank account.
+ *
+ * `credentialCiphertext` is AES-256-GCM (src/lib/crypto.ts); the plaintext
+ * token is never stored and never returned by any API.
+ */
+export const importConnections = sqliteTable(
+  'import_connections',
+  {
+    id: text('id').primaryKey(),
+    budgetId: text('budget_id')
+      .notNull()
+      .references(() => budgets.id),
+    provider: text('provider').notNull(),
+    label: text('label').notNull(),
+    credentialCiphertext: text('credential_ciphertext').notNull(),
+    /** Fresh random IV per encryption — never reused under one key. */
+    credentialIv: text('credential_iv').notNull(),
+    externalId: text('external_id'),
+    createdByUserId: text('created_by_user_id')
+      .notNull()
+      .references(() => users.id),
+    lastUsedAt: integer('last_used_at'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [index('import_connections_budget_idx').on(t.budgetId)],
+);
+
 export const payeeRules = sqliteTable(
   'payee_rules',
   {

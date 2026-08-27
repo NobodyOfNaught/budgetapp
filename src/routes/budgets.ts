@@ -11,6 +11,7 @@ import { accountRegisterRoute, transactionsRoute } from './transactions';
 import { monthsRoute } from './months';
 import { targetsRoute, upcomingRoute } from './targets';
 import { importsRoute } from './imports';
+import { importConnectionsRoute } from './import-connections';
 import { reportsRoute } from './reports';
 import { payeeRulesRoute } from './payee-rules';
 
@@ -64,5 +65,6 @@ budgetsRoute.route('/:budgetId/months', monthsRoute);
 budgetsRoute.route('/:budgetId/targets', targetsRoute);
 budgetsRoute.route('/:budgetId/upcoming', upcomingRoute);
 budgetsRoute.route('/:budgetId/imports', importsRoute);
+budgetsRoute.route('/:budgetId/import-connections', importConnectionsRoute);
 budgetsRoute.route('/:budgetId/reports', reportsRoute);
 budgetsRoute.route('/:budgetId/payee-rules', payeeRulesRoute);

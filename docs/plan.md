@@ -1197,6 +1197,56 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 27 — Stored provider credentials, and a one-click refresh
+
+The fetch (PR 26) needed the token pasted every time, which is not a refresh button. This
+adds `import_connections` (migration 0010) so a credential can be stored, and turns
+fetching into one click with no dates.
+
+**Why not a Worker secret.** That was the first attempt and it was wrong. A Worker secret
+is ONE global value for the whole deployment, while a Wise token identifies ONE person's
+bank account — and this app is multi-user (`budget_members`, owner/editor/viewer). A
+secret-held token would mean every user of the deployment reading the same person's
+transactions. Credentials are therefore rows, scoped to a budget, exactly as `accounts`
+and `payee_rules` are.
+
+**What a global secret IS right for** is the encryption key. `CREDENTIALS_KEY` holds a
+base64 AES-256 key; `src/lib/crypto.ts` seals each credential with AES-256-GCM under it,
+with a fresh random 96-bit IV per row. That key is app infrastructure rather than anyone's
+identity, which is precisely the distinction that makes it safe where a token is not: one
+shared key, one ciphertext per person. Rotating it invalidates every stored credential,
+recoverable by re-entering them, and that is the correct blast radius.
+
+GCM rather than CBC because it authenticates: a tampered or mis-keyed ciphertext fails to
+decrypt instead of yielding garbage that then gets sent to a bank's API as a token. The
+tests pin that, along with IV freshness and the refusal of a wrong-sized key.
+
+**Write-only.** No endpoint returns a decrypted credential, including to the owner who
+stored it — the only way to change one is to replace it. `loadConnectionSecret` is the
+single decrypt path and exists to talk to providers, never to answer a request. Three
+tests hold that line, including one that reads the D1 row directly, because "the API does
+not return it" and "it is not sitting in the database as plaintext" are different claims
+and only the second survives a database leak.
+
+**Roles.** Storing, replacing and forgetting a connection is owner-only. *Using* one is
+`editor`, matching the rest of importing: an editor never sees the secret, only its
+effects. Listing is `viewer` and returns metadata only, so a shared budget can show that a
+connection exists without exposing it.
+
+**The refresh itself.** With a stored connection, `POST /imports/wise/fetch` takes no dates
+and derives them: from the date of the newest Wise transaction already imported, through
+today. It starts ON that date rather than the day after — re-fetching a day already held is
+free, since rows dedupe on `(account_id, import_id)` and Wise's ids are stable, whereas
+starting a day later would silently lose anything that posted after the last fetch ran. One
+of those is harmless and the other is a hole in the ledger, so it overlaps on purpose. With
+nothing imported yet it falls back to the budget's cutoff, and failing that asks for an
+explicit start rather than inventing a start of history.
+
+Still not in this PR: any schedule. A cron trigger is now a small step (the credential and
+the range both resolve server-side), but running unattended is worth doing only after the
+manual button has been exercised against real data.
+
+
 ### PR 26 — Fetching Wise statements over the API
 
 `POST /imports/wise/fetch` reads every balance on the profile for a date range and returns

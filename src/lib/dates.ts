@@ -119,3 +119,15 @@ export function daysBetween(a: string, b: string): number {
   const msPerDay = 24 * 60 * 60 * 1000;
   return Math.round((Date.UTC(pb.year, pb.month - 1, pb.day) - Date.UTC(pa.year, pa.month - 1, pa.day)) / msPerDay);
 }
+
+/**
+ * Today as 'YYYY-MM-DD' in UTC.
+ *
+ * UTC rather than local because a Worker has no meaningful local timezone —
+ * it runs wherever Cloudflare puts it — so "local" would silently differ
+ * between two requests from the same user. Every other date in this schema
+ * is a plain calendar date compared as a string, and this matches.
+ */
+export function todayInUtc(now: number = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 10);
+}

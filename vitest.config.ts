@@ -20,7 +20,15 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: './wrangler.jsonc', environment: 'uat' },
         miniflare: {
-          bindings: { TEST_MIGRATIONS: migrations },
+          bindings: {
+            TEST_MIGRATIONS: migrations,
+            // A fixed, throwaway AES-256 key so the credential-storage
+            // tests exercise real encryption rather than a stub. Fine to
+            // hardcode precisely because it protects nothing: the test D1
+            // is created and destroyed per run. The real environments get
+            // theirs from `wrangler secret put CREDENTIALS_KEY`.
+            CREDENTIALS_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
+          },
         },
       }),
     ],

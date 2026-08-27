@@ -104,9 +104,9 @@ browses.
 | `stg` | https://budget-stg.naught.ca |
 | `main` / prod | https://budget.naught.ca |
 
-(The `stg` and `main` hostnames are inferred from their `EMAIL_FROM` bindings in
-`wrangler.jsonc` — `noreply@budget-stg.naught.ca` / `noreply@budget.naught.ca`. Only the
-`uat` one has been confirmed live; verify before relying on the other two.)
+All three confirmed by the user. They line up with the `EMAIL_FROM` bindings in
+`wrangler.jsonc` (`noreply@budget-stg.naught.ca` / `noreply@budget.naught.ca`), so the
+pattern holds if a fourth environment is ever added.
 
 ### Why this changed
 

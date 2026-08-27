@@ -199,6 +199,57 @@ function distinct(values: string[]): string[] {
   return [...new Set(values.filter((v) => v !== ''))];
 }
 
+function nested(row: Record<string, unknown>, outer: string, inner: string): string {
+  const value = row[outer];
+  if (value === null || typeof value !== 'object') return '';
+  return String((value as Record<string, unknown>)[inner] ?? '');
+}
+
+/**
+ * One id that appears on more than one row of the SAME balance.
+ *
+ * Unexpected, and it matters: src/import/wise.ts assumes a repeated id
+ * means one purchase drawing on two DIFFERENT currency balances, and keys
+ * such rows `${id}:${currency}` — which collides outright when the repeat
+ * is within a single currency. Before the JSON parser can be written, the
+ * rows have to be told apart, so this reports what differs between them
+ * without reporting what they are worth.
+ */
+export interface DuplicateIdGroup {
+  id: string;
+  count: number;
+  /** `details.type` per row sharing the id, in statement order. */
+  detailTypes: string[];
+  /** Direction per row: '+', '-' or '0'. The SIGN only — never the amount. */
+  signs: string[];
+  /** True when the rows are not adjacent in the statement, which rules out a simple two-leg pair. */
+  separated: boolean;
+}
+
+function duplicateGroups(rows: Record<string, unknown>[]): DuplicateIdGroup[] {
+  const positions = new Map<string, number[]>();
+  rows.forEach((row, index) => {
+    const id = String(row['referenceNumber'] ?? '');
+    if (id === '') return;
+    positions.set(id, [...(positions.get(id) ?? []), index]);
+  });
+
+  return [...positions.entries()]
+    .filter(([, indexes]) => indexes.length > 1)
+    .map(([id, indexes]) => ({
+      id,
+      count: indexes.length,
+      detailTypes: indexes.map((i) => nested(rows[i] as Record<string, unknown>, 'details', 'type')),
+      signs: indexes.map((i) => {
+        const raw = nested(rows[i] as Record<string, unknown>, 'amount', 'value');
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value === 0) return '0';
+        return value > 0 ? '+' : '-';
+      }),
+      separated: indexes.some((position, i) => i > 0 && position !== (indexes[i - 1] as number) + 1),
+    }));
+}
+
 /** What a single format returned for one balance: the ids it reported, or why it could not be read. */
 export interface StatementProbe {
   status: number;
@@ -215,6 +266,14 @@ export interface StatementProbe {
   fieldNames: string[];
   /** Distinct transaction-type values seen. A type label is a category name, not financial data, and it is what replaces the parser's name-matching heuristic. */
   types: string[];
+  /**
+   * Distinct `details.type` values. The top-level `type` turned out to be
+   * only DEBIT/CREDIT — direction, not kind — so this is the field that
+   * actually discriminates a card purchase from a transfer or a conversion.
+   */
+  detailTypes: string[];
+  /** Ids appearing on more than one row of this balance. Empty for CSV, which is not analysed this way. */
+  duplicates: DuplicateIdGroup[];
   error: string | null;
 }
 
@@ -225,6 +284,14 @@ export interface BalanceProbe {
   csv: StatementProbe;
   /** True when both formats were read and reported exactly the same ids in the same order. The format decision turns on this. */
   idsMatch: boolean;
+  /**
+   * The JSON statement verbatim, present ONLY when the caller explicitly
+   * opted in. This is the one part of the probe that returns real financial
+   * data — amounts, merchants, the lot — because a parser in this repo is
+   * written against real rows transcribed into golden tests, not against a
+   * schema. Off by default so the opt-in is a deliberate act.
+   */
+  rawJson?: string;
 }
 
 export interface WiseProbeResult {
@@ -239,6 +306,8 @@ function probeJson(response: WiseResponse): StatementProbe {
     headerLine: null,
     fieldNames: [],
     types: [],
+    detailTypes: [],
+    duplicates: [],
   };
   if (response.status !== 200) {
     return { ...base, ids: [], error: response.body.slice(0, 300) };
@@ -260,6 +329,8 @@ function probeJson(response: WiseResponse): StatementProbe {
           )
         : [],
       types: distinct(rows.map((row) => String(row['type'] ?? ''))),
+      detailTypes: distinct(rows.map((row) => nested(row, 'details', 'type'))),
+      duplicates: duplicateGroups(rows),
       error: null,
     };
   } catch {
@@ -268,9 +339,14 @@ function probeJson(response: WiseResponse): StatementProbe {
 }
 
 function probeCsv(response: WiseResponse): StatementProbe {
-  const base = { status: response.status, scaRequired: response.scaChallenge !== null, fieldNames: [] };
+  const base = {
+    status: response.status,
+    scaRequired: response.scaChallenge !== null,
+    fieldNames: [],
+    duplicates: [],
+  };
   if (response.status !== 200) {
-    return { ...base, ids: [], headerLine: null, types: [], error: response.body.slice(0, 300) };
+    return { ...base, ids: [], headerLine: null, types: [], detailTypes: [], error: response.body.slice(0, 300) };
   }
   const records = parseCsvRecords(response.body);
   return {
@@ -278,17 +354,26 @@ function probeCsv(response: WiseResponse): StatementProbe {
     ids: records.map(csvId),
     headerLine: response.body.split('\n', 1)[0] ?? null,
     types: distinct(records.map((record) => record['Transaction Type'] ?? '')),
+    detailTypes: distinct(records.map((record) => record['Transaction Details Type'] ?? '')),
     error: null,
   };
 }
 
 /**
  * Reads both statement formats for every balance on every profile over one
- * interval and reports what came back, WITHOUT returning transaction
- * amounts, payees or the token — only ids, counts and status, which is
- * everything the format decision needs and nothing more.
+ * interval and reports what came back.
+ *
+ * By default this is SCHEMA ONLY — ids, counts, field names, type labels
+ * and status, never amounts, payees or the token. `includeRaw` is the one
+ * exception and must be asked for explicitly: it attaches each balance's
+ * JSON statement verbatim, which a parser cannot be written without.
  */
-export async function probeWiseApi(token: string, startDate: string, endDate: string): Promise<WiseProbeResult> {
+export async function probeWiseApi(
+  token: string,
+  startDate: string,
+  endDate: string,
+  includeRaw = false,
+): Promise<WiseProbeResult> {
   const profiles = await fetchProfiles(token);
   const balances: BalanceProbe[] = [];
 
@@ -297,9 +382,16 @@ export async function probeWiseApi(token: string, startDate: string, endDate: st
       // Sequential on purpose: this is a diagnostic run against a rate-limited
       // third-party API, so a handful of extra seconds is worth more than
       // fanning out and risking a 429 that muddies the result.
-      const json = probeJson(
-        await fetchStatement(token, profile.id, balance.id, balance.currency, startDate, endDate, 'json'),
+      const jsonResponse = await fetchStatement(
+        token,
+        profile.id,
+        balance.id,
+        balance.currency,
+        startDate,
+        endDate,
+        'json',
       );
+      const json = probeJson(jsonResponse);
       const csv = probeCsv(
         await fetchStatement(token, profile.id, balance.id, balance.currency, startDate, endDate, 'csv'),
       );
@@ -310,7 +402,14 @@ export async function probeWiseApi(token: string, startDate: string, endDate: st
         json.ids.length === csv.ids.length &&
         json.ids.every((id, i) => id === csv.ids[i]);
 
-      balances.push({ balanceId: balance.id, currency: balance.currency, json, csv, idsMatch });
+      balances.push({
+        balanceId: balance.id,
+        currency: balance.currency,
+        json,
+        csv,
+        idsMatch,
+        ...(includeRaw && jsonResponse.status === 200 ? { rawJson: jsonResponse.body } : {}),
+      });
     }
   }
 

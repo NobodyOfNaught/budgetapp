@@ -172,6 +172,13 @@ const wiseProbeSchema = z.object({
   token: z.string().min(1),
   start: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
   end: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+  /**
+   * Attach each balance's JSON statement verbatim. The only part of this
+   * endpoint that returns real financial data, so it defaults to off and
+   * has to be asked for — it exists because a parser here is written
+   * against real rows transcribed into golden tests, not against a schema.
+   */
+  includeRaw: z.boolean().optional(),
 });
 
 /**
@@ -191,7 +198,7 @@ const wiseProbeSchema = z.object({
 importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
   const parsed = wiseProbeSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
-  const { token, start, end } = parsed.data;
+  const { token, start, end, includeRaw } = parsed.data;
 
   if (start > end) {
     return c.json({ error: 'invalid_range', detail: 'start must be on or before end' }, 400);
@@ -201,7 +208,7 @@ importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
   }
 
   try {
-    return c.json(await probeWiseApi(token, start, end));
+    return c.json(await probeWiseApi(token, start, end, includeRaw ?? false));
   } catch (error) {
     // Surface Wise's own status rather than a blanket 500, so a 401 (bad or
     // revoked token) reads differently from a 403 (SCA challenge) — the

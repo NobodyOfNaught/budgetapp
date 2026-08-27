@@ -3,6 +3,7 @@ import { apiFetch } from '../api';
 import { AccountForm } from '../components/AccountForm';
 import { BudgetMonth } from '../components/BudgetMonth';
 import { ImportForm } from '../components/ImportForm';
+import { WiseProbe } from '../components/WiseProbe';
 import { PayeeRules } from '../components/PayeeRules';
 import { Register } from '../components/Register';
 import { Reports } from '../components/Reports';
@@ -25,6 +26,7 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
   const [view, setView] = useState<View>({ kind: 'budget' });
   const [showAccountForm, setShowAccountForm] = useState(false);
   const [showImportForm, setShowImportForm] = useState(false);
+  const [showWiseProbe, setShowWiseProbe] = useState(false);
   // Count of imported-but-unapproved rows, for the Review badge.
   const [unapprovedCount, setUnapprovedCount] = useState(0);
   // Bumped every time reloadUnapproved runs — passed to ReviewImport so it
@@ -146,6 +148,8 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
         {accounts.length > 0 && (
           <button onClick={() => setShowImportForm((v) => !v)}>{showImportForm ? 'Cancel' : 'Import file'}</button>
         )}
+        <button onClick={() => setShowWiseProbe((v) => !v)}>{showWiseProbe ? 'Cancel' : 'Wise API probe'}</button>
+        {showWiseProbe && <WiseProbe budgetId={budgetId} onCancel={() => setShowWiseProbe(false)} />}
         {showImportForm && (
           <ImportForm
             budgetId={budgetId}

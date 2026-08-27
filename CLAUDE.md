@@ -55,7 +55,18 @@ sequencing rule — read it before running any `wrangler deploy` or
 
 ### Commands, per environment
 
+**Run `npm run build` before EVERY `wrangler deploy`.** `wrangler deploy` does not build
+the SPA — it uploads whatever is already sitting in `web/dist` as Workers Static Assets.
+Skipping it deploys the new Worker against a STALE UI bundle, which fails in the most
+confusing way possible: the API changes are live, the user hard-refreshes, and the
+feature is simply absent with no error anywhere. `npm run check` does not catch this
+(`vitest` only writes a placeholder `web/dist/index.html` — see the `pretest` script).
+This has already been shipped wrong once; treat the build as part of the deploy, not a
+separate optional step.
+
 ```sh
+npm run build   # ALWAYS, before any deploy below — see above
+
 # uat — always first
 npx wrangler d1 migrations apply budgetapp-uat-db --env uat --remote   # if there's a migration
 npx wrangler deploy --env uat
@@ -79,6 +90,23 @@ the UAT approval to the `main` block.
 
 After every deploy, check `<url>/api/v1/health` on whatever you just touched before
 moving on or reporting done.
+
+### Environment URLs
+
+Each environment has a custom domain. Prefer these over the
+`*.workers.dev` URLs when health-checking, smoke-testing, or telling the user where to
+look — `workers.dev` still resolves, but the custom domain is what the user actually
+browses.
+
+| Environment | URL |
+| --- | --- |
+| `uat` | https://budget-uat.naught.ca |
+| `stg` | https://budget-stg.naught.ca |
+| `main` / prod | https://budget.naught.ca |
+
+(The `stg` and `main` hostnames are inferred from their `EMAIL_FROM` bindings in
+`wrangler.jsonc` — `noreply@budget-stg.naught.ca` / `noreply@budget.naught.ca`. Only the
+`uat` one has been confirmed live; verify before relying on the other two.)
 
 ### Why this changed
 

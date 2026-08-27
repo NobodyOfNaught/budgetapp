@@ -1197,6 +1197,71 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 25 — Wise API statement parser (`wise_json`)
+
+Wise exposes the same balance statement its web UI downloads at a REST endpoint, which
+opens the door to fetching transactions automatically instead of downloading a CSV by
+hand. This PR lands the parser only — no fetching, no credential storage, no schedule.
+
+**The format choice was made on evidence, not preference.** The initial plan was to fetch
+`statement.csv` and reuse `src/import/wise.ts` unchanged. Probing the real API killed
+that: the API's CSV is a *different file* from the web-UI export, sharing only a
+filename. The export has `ID` / `Direction` / `Source amount (after fees)`; the API has
+`TransferWise ID` / `Amount` / `Running Balance` / `Transaction Type`. A new parser was
+required either way, so it targets the JSON, which carries an explicit type field and a
+per-row running balance. Both parsers now coexist: a hand-downloaded statement is still
+the CSV, so `wise` did not go away.
+
+Verified against a real account (profile 9886004, CAD + USD + two empty balances,
+2025-09 → 2026-08, 309 rows):
+
+- **`amount.value` is the exact balance impact, fees included.** Chaining it through
+  `runningBalance` reproduces every row and lands on `endOfStatementBalance` in all four
+  files. The CSV parser's post-fee reconstruction (`sourceDebitMinor`) has no analogue
+  and must not be re-invented — re-adding `totalFees` would double-count. This also gives
+  the format something no other statement here has: `checkStatementBalance()` proves an
+  import reconciles, which is the `<LEDGERBAL>` idea from the QFX work but per-row.
+- **`details.type` replaces a heuristic that had already caused a real bug.** `CARD` /
+  `MONEY_ADDED` / `DEPOSIT` / `TRANSFER`. The CSV parser infers "conversion between my own
+  balances" from source and target names matching, which misread a real 1900.00 CAD
+  top-up as an internal conversion and emitted a phantom debit. A top-up is now just
+  `MONEY_ADDED`.
+
+**One transaction per JSON row — groups are never merged.** A `referenceNumber` is not
+unique within a balance (34 collisions in 293 USD rows), and the repeats turned out to
+have three unrelated causes: a tip posting a day after its base charge, an
+over-authorisation later partly refunded, and a transfer that was returned eight days
+later. The last one is decisive. Netting a group to its `details.amount` would collapse
+the returned transfer to zero and erase the week the money was actually gone — which the
+daily net-worth report (PR 22) would then draw as a line that never dipped. Per-row
+emission is what `runningBalance` validates, so correctness is structural.
+
+`importId` is therefore `${referenceNumber}:${date}` with the full microsecond timestamp.
+Tested against the real files: bare `referenceNumber` collides 34 times, `reference:day`
+collides 23 times, `reference:timestamp` is unique across all 309 rows and is independent
+of neighbouring rows, so re-fetching a different window yields the same key.
+
+**Existing history is not migrated.** The API reports `CARD-4145111585` where CSV-imported
+history holds `CARD_TRANSACTION-4145111585` — same transaction, same number, different
+prefix (confirmed against the live database: 547 Wise rows, exactly two prefixes,
+`CARD_TRANSACTION` ×445 and `TRANSFER` ×102, the latter identical in both formats).
+Reconciling them is not worth it, because the schemes differ in more than the prefix: old
+ids key merged groups, new ids key individual rows. The import cutoff that already exists
+(`budgets.import_cutoff_date`) handles this instead — start the first API fetch the day
+after the last imported row and the two schemes never meet.
+
+A separate category-suggestion map was needed: the JSON carries MCC descriptions
+("Grocery Stores, Supermarkets", "Service Stations (with or withou") rather than Wise's
+own short labels, so the CSV parser's map matches nothing. Matching is by prefix because
+Wise truncates those descriptions at about 32 characters.
+
+Deliberately not in this PR, and each needs its own decision: credential storage (a Wise
+token identifies one person, so it cannot be a Worker secret in a multi-user app — see
+the `import_connections` sketch), the fetch path itself (statements are per balance per
+currency, so a cross-balance purchase arrives as two separate calls that must be merged
+before parsing), and any schedule.
+
+
 ### PR 24 — Group and budget totals on the budget screen
 
 Each category group's table now ends with a bold subtotal row, and the whole table ends

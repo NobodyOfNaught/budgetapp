@@ -11,6 +11,7 @@ import { parseVancityCsv, suggestedCategoryName as vancitySuggestion } from './v
 import { parseSimpliiCsv, suggestedCategoryName as simpliiSuggestion } from './simplii';
 import { parseVancityVisaCsv, suggestedCategoryName as vancityVisaSuggestion } from './vancity-visa';
 import { parseOfx, suggestedCategoryName as ofxSuggestion } from './ofx';
+import { parseWiseJson, suggestedCategoryName as wiseJsonSuggestion } from './wise-json';
 
 // 'ofx' is deliberately the format, not a bank: OFX/QFX/QBO is one shared
 // standard, so a single entry serves Chase and any other institution that
@@ -26,6 +27,9 @@ export const IMPORT_PROVIDERS = [
   'vancity_visa',
   'simplii',
   'ofx',
+  // The Wise API's JSON statement — a different format from the 'wise'
+  // web-UI CSV above, not a replacement for it. See src/import/wise-json.ts.
+  'wise_json',
 ] as const;
 export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 
@@ -39,6 +43,7 @@ const PARSERS: Record<ImportProvider, StatementParser> = {
   vancity_visa: parseVancityVisaCsv,
   simplii: parseSimpliiCsv,
   ofx: parseOfx,
+  wise_json: parseWiseJson,
 };
 
 /** Maps a provider's own category label onto a seeded category NAME, or null when there's no confident match. */
@@ -52,6 +57,7 @@ const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | nu
   vancity_visa: vancityVisaSuggestion,
   simplii: simpliiSuggestion,
   ofx: ofxSuggestion,
+  wise_json: wiseJsonSuggestion,
 };
 
 export function isImportProvider(value: string): value is ImportProvider {

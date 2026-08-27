@@ -20,4 +20,8 @@ export const IMPORT_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   // a shared standard, so this covers Chase and anything else offering it.
   // See src/import/ofx.ts.
   { value: 'ofx', label: 'OFX / QFX / QBO (Chase and others)' },
+  // Wise's API statement, which is a different format from the 'wise'
+  // web-UI CSV above rather than a replacement for it — both parsers exist
+  // because both files exist. See src/import/wise-json.ts.
+  { value: 'wise_json', label: 'Wise (API statement JSON)' },
 ];

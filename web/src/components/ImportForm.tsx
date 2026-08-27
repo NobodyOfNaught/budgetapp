@@ -391,11 +391,12 @@ export function ImportForm({
           <label>
             {/* Not just CSV since the OFX provider landed — a .qfx/.qbo
                 download is plain text too, so file.text() below needs no
-                change, only the picker's filter. */}
+                change, only the picker's filter. Same for .json, added for
+                the Wise API statement (src/import/wise-json.ts). */}
             File{' '}
             <input
               type="file"
-              accept=".csv,text/csv,.ofx,.qfx,.qbo"
+              accept=".csv,text/csv,.ofx,.qfx,.qbo,.json,application/json"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               required
             />

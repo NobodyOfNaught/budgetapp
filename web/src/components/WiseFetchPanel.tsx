@@ -48,8 +48,9 @@ export function WiseFetchPanel({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<FetchedStatement | null>(null);
 
-  async function run(event: React.FormEvent) {
-    event.preventDefault();
+  const canRun = token.trim() !== '' && start !== '' && end !== '' && start <= end;
+
+  async function run() {
     setBusy(true);
     setError(null);
     setResult(null);
@@ -89,7 +90,12 @@ export function WiseFetchPanel({
         until you import it. The token is used for this one request and not saved.
       </p>
 
-      <form onSubmit={run}>
+      {/* NOT a <form>. This panel renders inside ImportForm's own <form>,
+          and HTML does not nest forms: a nested one made this button submit
+          the OUTER form natively, reloading the page and never running the
+          fetch. Hence a plain div, an explicit type="button", and the
+          validation that `required` would otherwise have done. */}
+      <div>
         <div>
           <label>
             Wise API token{' '}
@@ -99,27 +105,29 @@ export function WiseFetchPanel({
               onChange={(e) => setToken(e.target.value)}
               autoComplete="off"
               size={40}
-              required
             />
           </label>
         </div>
         <div style={{ marginTop: '0.5rem' }}>
           <label>
-            From <input type="date" value={start} onChange={(e) => setStart(e.target.value)} required />
+            From <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
           </label>{' '}
           <label>
-            To <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} required />
+            To <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
           </label>
         </div>
         <div style={{ marginTop: '0.5rem' }}>
-          <button type="submit" disabled={busy || token.trim() === ''}>
+          <button type="button" onClick={() => void run()} disabled={busy || !canRun}>
             {busy ? 'Fetching…' : 'Fetch'}
           </button>{' '}
           <button type="button" onClick={() => setOpen(false)} disabled={busy}>
             Close
           </button>
+          {!canRun && !busy && (
+            <span style={{ marginLeft: '0.5rem', color: '#555' }}>Token and both dates are needed.</span>
+          )}
         </div>
-      </form>
+      </div>
 
       {error && (
         <p style={{ color: '#b00', fontSize: '0.85rem', wordBreak: 'break-all' }}>

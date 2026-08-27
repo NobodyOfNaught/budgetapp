@@ -11,6 +11,8 @@ import { accounts, budgets, categories, importBatches, payees, transactions } fr
 import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName, type ImportProvider } from '../import';
 import { cleanPayeeName } from '../import/payee-name';
 import { matchPayeeRule, type PayeeRule } from '../import/rules';
+import { MAX_STATEMENT_DAYS, probeWiseApi, WiseApiError } from '../import/wise-api';
+import { daysBetween } from '../lib/dates';
 import { ulid } from '../lib/ids';
 import { convertToBudgetMinor, parseFxRateToMicros } from '../lib/money';
 import { budgetIdParam } from '../lib/params';
@@ -150,10 +152,54 @@ async function resolveCurrencyAccount(
   return { id, name, created: true };
 }
 
+/** Plain YYYY-MM-DD, the only date shape any query param in this app accepts. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 export const importsRoute = new Hono<AppEnv>();
 importsRoute.use('*', requireBudgetMember('viewer'));
 
 importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
+
+/**
+ * One-shot diagnostic against the real Wise API, to settle two questions
+ * the documentation cannot answer for a specific account before the import
+ * path is built on guesses about them: whether statement reads trigger SCA
+ * for this profile, and whether the JSON and CSV statements agree on
+ * transaction ids (see src/import/wise-api.ts's Diagnostics section for why
+ * that decides the format).
+ *
+ * Returns ids, counts and status only — never amounts, payees, or the
+ * token. Gated on 'owner' rather than 'editor': the token is account-wide
+ * credentials for an external financial service, so reading anything
+ * derived from it is not something a shared editor should be able to do.
+ */
+importsRoute.get('/wise/probe', requireBudgetMember('owner'), async (c) => {
+  const token = c.env.WISE_API_TOKEN;
+  if (!token) {
+    return c.json({ error: 'wise_not_configured', detail: 'WISE_API_TOKEN is not set in this environment' }, 400);
+  }
+
+  const start = c.req.query('start') ?? '';
+  const end = c.req.query('end') ?? '';
+  if (!ISO_DATE_RE.test(start) || !ISO_DATE_RE.test(end) || start > end) {
+    return c.json({ error: 'invalid_range', detail: 'start and end must be YYYY-MM-DD with start <= end' }, 400);
+  }
+  if (daysBetween(start, end) > MAX_STATEMENT_DAYS) {
+    return c.json({ error: 'range_too_long', detail: `Wise allows at most ${MAX_STATEMENT_DAYS} days per statement` }, 400);
+  }
+
+  try {
+    return c.json(await probeWiseApi(token, start, end));
+  } catch (error) {
+    // Surface Wise's own status rather than a blanket 500, so a 401 (bad or
+    // revoked token) reads differently from a 403 (SCA challenge) — the
+    // whole point of running this.
+    if (error instanceof WiseApiError) {
+      return c.json({ error: 'wise_request_failed', status: error.status, scaRequired: error.scaChallenge !== null }, 502);
+    }
+    throw error;
+  }
+});
 
 /**
  * Parses a file WITHOUT writing anything, so the UI can show provider-

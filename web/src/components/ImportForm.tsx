@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 import { IMPORT_PROVIDER_OPTIONS } from '../providers';
+import { WiseFetchPanel } from './WiseFetchPanel';
 import type { Account, BudgetDetail, ImportBatch, ImportSummary, UndoImportResult } from '../types';
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
@@ -387,6 +388,16 @@ export function ImportForm({
             </select>
           </label>
         </div>
+        <WiseFetchPanel
+          budgetId={budgetId}
+          onFetched={(fetchedFile, fetchedProvider) => {
+            // Goes through the same two pieces of state a picked file does,
+            // so inspect/submit below need no notion of where the statement
+            // came from.
+            setFile(fetchedFile);
+            setProvider(fetchedProvider);
+          }}
+        />
         <div>
           <label>
             {/* Not just CSV since the OFX provider landed — a .qfx/.qbo

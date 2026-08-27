@@ -415,3 +415,99 @@ export async function probeWiseApi(
 
   return { profiles, balances };
 }
+
+// --- Fetching a statement for import ---------------------------------------
+
+/** One balance's contribution to a merged fetch, kept separately so a per-balance problem is reportable rather than averaged away. */
+export interface FetchedBalance {
+  balanceId: number;
+  currency: string;
+  rowCount: number;
+  /** Result of that balance's own reconciliation check, or null when it reconciled. */
+  balanceWarning: string | null;
+}
+
+export interface FetchedStatement {
+  /**
+   * Every balance's transactions concatenated into ONE document, which is
+   * then parsed and imported exactly as an uploaded file would be.
+   *
+   * Merging rather than importing each balance separately is what makes a
+   * purchase split across two balances come out right: the CAD leg and the
+   * USD leg arrive in one parse, and src/routes/imports.ts's
+   * resolveCurrencyAccount routes each to its own currency account. Import
+   * them one balance at a time and each import sees only half the picture.
+   *
+   * Deliberately carries no start/end balance: those are per-balance
+   * figures and would be meaningless summed across currencies. Each
+   * balance is reconciled BEFORE merging — see `balances`.
+   */
+  statementJson: string;
+  balances: FetchedBalance[];
+  profileId: number;
+}
+
+interface RawStatement {
+  transactions?: unknown[];
+}
+
+/**
+ * Reads every balance on every profile the token can see over one interval
+ * and returns them merged, ready to hand to the ordinary import path.
+ *
+ * `checkBalance` is injected rather than imported so this module keeps its
+ * "HTTP only, no parsing" shape — the reconciliation logic lives with the
+ * parser in ./wise-json.ts, which is the thing that knows what an amount
+ * means.
+ */
+export async function fetchStatementForImport(
+  token: string,
+  startDate: string,
+  endDate: string,
+  checkBalance: (statementJson: string) => string | null,
+): Promise<FetchedStatement> {
+  const profiles = await fetchProfiles(token);
+  const profile = profiles[0];
+  if (!profile) throw new WiseApiError('Wise returned no profiles for this token', 200, null);
+
+  const merged: unknown[] = [];
+  const balances: FetchedBalance[] = [];
+
+  for (const balance of await fetchBalances(token, profile.id)) {
+    // Sequential: a rate-limited third-party API, and a 429 midway would
+    // produce a partial import, which is worse than a slow one.
+    const response = await fetchStatement(
+      token,
+      profile.id,
+      balance.id,
+      balance.currency,
+      startDate,
+      endDate,
+      'json',
+    );
+    if (response.status !== 200) {
+      throw new WiseApiError(
+        `Wise statement for ${balance.currency} returned ${response.status}`,
+        response.status,
+        response.scaChallenge,
+      );
+    }
+
+    const rows = (JSON.parse(response.body) as RawStatement).transactions ?? [];
+    merged.push(...rows);
+    balances.push({
+      balanceId: balance.id,
+      currency: balance.currency,
+      rowCount: rows.length,
+      // Checked against THIS balance's own opening and closing figures,
+      // before the rows lose that context in the merge.
+      balanceWarning: checkBalance(response.body),
+    });
+  }
+
+  return {
+    statementJson: JSON.stringify({ transactions: merged }),
+    balances,
+    profileId: profile.id,
+  };
+}

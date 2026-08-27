@@ -11,7 +11,8 @@ import { accounts, budgets, categories, importBatches, payees, transactions } fr
 import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName, type ImportProvider } from '../import';
 import { cleanPayeeName } from '../import/payee-name';
 import { matchPayeeRule, type PayeeRule } from '../import/rules';
-import { MAX_STATEMENT_DAYS, probeWiseApi, WiseApiError } from '../import/wise-api';
+import { fetchStatementForImport, MAX_STATEMENT_DAYS, probeWiseApi, WiseApiError } from '../import/wise-api';
+import { checkStatementBalance } from '../import/wise-json';
 import { daysBetween } from '../lib/dates';
 import { ulid } from '../lib/ids';
 import { convertToBudgetMinor, parseFxRateToMicros } from '../lib/money';
@@ -213,6 +214,47 @@ importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
     // Surface Wise's own status rather than a blanket 500, so a 401 (bad or
     // revoked token) reads differently from a 403 (SCA challenge) — the
     // whole point of running this.
+    if (error instanceof WiseApiError) {
+      return c.json({ error: 'wise_request_failed', status: error.status, scaRequired: error.scaChallenge !== null }, 502);
+    }
+    throw error;
+  }
+});
+
+const wiseFetchSchema = z.object({
+  /** Per call, never persisted — same reasoning as the probe above. */
+  token: z.string().min(1),
+  start: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+  end: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+});
+
+/**
+ * Downloads a Wise statement over the API and hands it back as file text,
+ * for the caller to run through the ordinary import path.
+ *
+ * It deliberately stops at "here is the file" rather than importing
+ * directly. Every guard the upload path already has — the cutoff date, the
+ * FX rate, per-currency account resolution, payee rules, the review queue —
+ * then applies unchanged and un-duplicated, and a fetch that goes wrong
+ * costs nothing because nothing was written.
+ *
+ * Owner-gated, like the probe: this hands credentials to an external
+ * financial service.
+ */
+importsRoute.post('/wise/fetch', requireBudgetMember('owner'), async (c) => {
+  const parsed = wiseFetchSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
+  const { token, start, end } = parsed.data;
+
+  if (start > end) return c.json({ error: 'invalid_range', detail: 'start must be on or before end' }, 400);
+  if (daysBetween(start, end) > MAX_STATEMENT_DAYS) {
+    return c.json({ error: 'range_too_long', detail: `Wise allows at most ${MAX_STATEMENT_DAYS} days per statement` }, 400);
+  }
+
+  try {
+    const fetched = await fetchStatementForImport(token, start, end, checkStatementBalance);
+    return c.json(fetched);
+  } catch (error) {
     if (error instanceof WiseApiError) {
       return c.json({ error: 'wise_request_failed', status: error.status, scaRequired: error.scaChallenge !== null }, 502);
     }

@@ -160,6 +160,20 @@ importsRoute.use('*', requireBudgetMember('viewer'));
 
 importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
 
+const wiseProbeSchema = z.object({
+  /**
+   * Supplied per call and never persisted. A Wise token identifies ONE
+   * person's Wise account, so it cannot live in a Worker secret: those are
+   * one global value for the whole deployment, which in a multi-user app
+   * (see budget_members) would mean every user reading the same person's
+   * bank. Real credential storage belongs per-connection and encrypted at
+   * rest — out of scope for a diagnostic that stores nothing.
+   */
+  token: z.string().min(1),
+  start: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+  end: z.string().regex(ISO_DATE_RE, 'expected YYYY-MM-DD'),
+});
+
 /**
  * One-shot diagnostic against the real Wise API, to settle two questions
  * the documentation cannot answer for a specific account before the import
@@ -168,21 +182,19 @@ importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
  * transaction ids (see src/import/wise-api.ts's Diagnostics section for why
  * that decides the format).
  *
- * Returns ids, counts and status only — never amounts, payees, or the
- * token. Gated on 'owner' rather than 'editor': the token is account-wide
- * credentials for an external financial service, so reading anything
- * derived from it is not something a shared editor should be able to do.
+ * POST rather than GET because the token travels in the body: a query
+ * string would land in access logs and browser history. Returns ids,
+ * counts and status only — never amounts, payees, or the token itself.
+ * Gated on 'owner': whoever runs this is handing over credentials to an
+ * external financial service, which is not a shared editor's call.
  */
-importsRoute.get('/wise/probe', requireBudgetMember('owner'), async (c) => {
-  const token = c.env.WISE_API_TOKEN;
-  if (!token) {
-    return c.json({ error: 'wise_not_configured', detail: 'WISE_API_TOKEN is not set in this environment' }, 400);
-  }
+importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
+  const parsed = wiseProbeSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
+  const { token, start, end } = parsed.data;
 
-  const start = c.req.query('start') ?? '';
-  const end = c.req.query('end') ?? '';
-  if (!ISO_DATE_RE.test(start) || !ISO_DATE_RE.test(end) || start > end) {
-    return c.json({ error: 'invalid_range', detail: 'start and end must be YYYY-MM-DD with start <= end' }, 400);
+  if (start > end) {
+    return c.json({ error: 'invalid_range', detail: 'start must be on or before end' }, 400);
   }
   if (daysBetween(start, end) > MAX_STATEMENT_DAYS) {
     return c.json({ error: 'range_too_long', detail: `Wise allows at most ${MAX_STATEMENT_DAYS} days per statement` }, 400);

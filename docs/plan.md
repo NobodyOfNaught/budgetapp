@@ -1197,6 +1197,39 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 26 — Fetching Wise statements over the API
+
+`POST /imports/wise/fetch` reads every balance on the profile for a date range and returns
+the statement as **file text**, stopping deliberately short of importing it. The UI wraps
+the result in a real `File` and hands it to the same state the file picker fills.
+
+That indirection is the point. The cutoff date, the FX rate, per-currency account
+resolution, payee rules and the review queue all apply to a fetched statement exactly as
+they do to an uploaded one, with no second import path to keep in step — and a fetch that
+goes wrong costs nothing, because nothing has been written by then.
+
+Balances are **merged into one document before parsing**, not imported one at a time. That
+is what makes a purchase split across two balances come out right: the CAD leg and the USD
+leg reach the parser together and `resolveCurrencyAccount` routes each to its own account.
+Imported separately, each pass would see only half of it.
+
+Each balance is reconciled against its own opening and closing figures *before* the merge,
+since those are per-balance numbers and would be meaningless summed across currencies. The
+panel reports the result per balance, so rows that do not add up to what Wise itself says
+happened are visible before importing rather than after.
+
+The fetch also surfaces each balance's `startOfStatementBalance` — what Wise held the
+moment before the requested range. That is the missing half of any import that does not
+start at the account's own beginning, and it closes the opening-balance gap PR 15 left
+open: rather than reverse-engineering an opening balance from a bank statement by hand
+(which is how Wise CAD ended up sitting at 0.00), the number comes from Wise directly.
+
+Credentials are still per-request and unstored. A Wise token identifies one person's
+account and this app is multi-user, so a Worker secret is the wrong home for it; persisted
+per-connection credentials, encrypted at rest, remain their own piece of work, as does any
+schedule.
+
+
 ### PR 25 — Wise API statement parser (`wise_json`)
 
 Wise exposes the same balance statement its web UI downloads at a REST endpoint, which

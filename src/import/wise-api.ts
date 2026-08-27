@@ -425,6 +425,18 @@ export interface FetchedBalance {
   rowCount: number;
   /** Result of that balance's own reconciliation check, or null when it reconciled. */
   balanceWarning: string | null;
+  /**
+   * What Wise says this balance held immediately BEFORE the requested
+   * range — its `startOfStatementBalance`, as a plain decimal string.
+   *
+   * Surfaced because it is the missing half of any import that does not
+   * start at the account's own beginning: the rows describe the movement,
+   * and this describes what they moved from. Without it an opening-balance
+   * row has to be reverse-engineered from a bank statement by hand, which
+   * is exactly how Wise CAD ended up sitting at 0.00 (see docs/plan.md's
+   * PR 15 notes on the missing Wise opening balance).
+   */
+  openingBalance: string | null;
 }
 
 export interface FetchedStatement {
@@ -449,6 +461,7 @@ export interface FetchedStatement {
 
 interface RawStatement {
   transactions?: unknown[];
+  startOfStatementBalance?: { value?: number };
 }
 
 /**
@@ -493,7 +506,8 @@ export async function fetchStatementForImport(
       );
     }
 
-    const rows = (JSON.parse(response.body) as RawStatement).transactions ?? [];
+    const document = JSON.parse(response.body) as RawStatement;
+    const rows = document.transactions ?? [];
     merged.push(...rows);
     balances.push({
       balanceId: balance.id,
@@ -502,6 +516,10 @@ export async function fetchStatementForImport(
       // Checked against THIS balance's own opening and closing figures,
       // before the rows lose that context in the merge.
       balanceWarning: checkBalance(response.body),
+      openingBalance:
+        document.startOfStatementBalance?.value === undefined
+          ? null
+          : String(document.startOfStatementBalance.value),
     });
   }
 

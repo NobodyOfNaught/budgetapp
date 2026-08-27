@@ -23,6 +23,7 @@ interface FetchedBalance {
   currency: string;
   rowCount: number;
   balanceWarning: string | null;
+  openingBalance: string | null;
 }
 
 interface FetchedStatement {
@@ -138,6 +139,16 @@ export function WiseFetchPanel({
             {result.balances.map((balance) => (
               <li key={balance.balanceId}>
                 {balance.currency}: {balance.rowCount} row{balance.rowCount === 1 ? '' : 's'}
+                {balance.rowCount > 0 && balance.openingBalance !== null && (
+                  // The balance Wise held immediately before this range —
+                  // i.e. what an opening-balance row for this account
+                  // should say, if the import does not start at the
+                  // account's own beginning.
+                  <>
+                    {' '}
+                    · balance before {balance.openingBalance} {balance.currency}
+                  </>
+                )}
                 {balance.balanceWarning && (
                   // Wise reports its own opening and closing balance per
                   // statement, so a mismatch means the rows do not add up
@@ -150,6 +161,10 @@ export function WiseFetchPanel({
           {result.balances.every((b) => b.balanceWarning === null) && (
             <p style={{ margin: 0, color: '#161' }}>Every balance reconciles against Wise&apos;s own figures.</p>
           )}
+          <p style={{ margin: '0.25rem 0 0', color: '#555' }}>
+            &ldquo;Balance before&rdquo; is what Wise held the moment before this range starts. If the account has no
+            transactions older than that, its opening-balance row should equal it.
+          </p>
         </div>
       )}
     </div>

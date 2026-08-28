@@ -82,6 +82,14 @@ export function ImportForm({
   const [accountId, setAccountId] = useState(importable[0]?.id ?? '');
   const [provider, setProvider] = useState('wise');
   const [file, setFile] = useState<File | null>(null);
+  // Set when the statement came from the Wise API rather than the file
+  // picker. A fetched statement dictates its OWN parser — it is JSON, not
+  // whatever CSV the account was last set up for — so the account-switch
+  // effect below must not overwrite that choice. Without this, picking the
+  // Wise account after a fetch silently reset the provider to 'wise', the
+  // CSV parser ran over JSON, every row was skipped as "missing an id or a
+  // date", and the import reported success having written nothing.
+  const [providerPinned, setProviderPinned] = useState(false);
   const [fxRate, setFxRate] = useState('');
   // The budget-wide "don't import anything older than this" guard
   // (budgets.import_cutoff_date — migrations/0009). Loaded from the budget
@@ -183,8 +191,12 @@ export function ImportForm({
   // "missing an id or a date", which reads like a broken file rather than
   // the wrong provider being selected.
   useEffect(() => {
+    if (providerPinned) return;
     const account = importable.find((a) => a.id === accountId);
     setProvider(account?.importProvider ?? 'wise');
+    // providerPinned is read, not depended on: re-running when it changes
+    // would re-apply the account's provider the moment a pin is released,
+    // which is the opposite of what releasing it means.
   }, [accountId]);
 
   function toggleMember(name: string) {
@@ -379,7 +391,13 @@ export function ImportForm({
         <div>
           <label>
             From{' '}
-            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+            <select
+              value={provider}
+              onChange={(e) => {
+                setProvider(e.target.value);
+                setProviderPinned(false);
+              }}
+            >
               {IMPORT_PROVIDER_OPTIONS.map((p) => (
                 <option key={p.value} value={p.value}>
                   {p.label}
@@ -393,9 +411,12 @@ export function ImportForm({
           onFetched={(fetchedFile, fetchedProvider) => {
             // Goes through the same two pieces of state a picked file does,
             // so inspect/submit below need no notion of where the statement
-            // came from.
+            // came from — plus a pin, because this provider came from the
+            // statement itself and must survive the user then choosing
+            // which account to import it into.
             setFile(fetchedFile);
             setProvider(fetchedProvider);
+            setProviderPinned(true);
           }}
         />
         <div>
@@ -408,7 +429,10 @@ export function ImportForm({
             <input
               type="file"
               accept=".csv,text/csv,.ofx,.qfx,.qbo,.json,application/json"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                setFile(e.target.files?.[0] ?? null);
+                setProviderPinned(false);
+              }}
               required
             />
           </label>

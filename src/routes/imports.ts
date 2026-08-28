@@ -8,7 +8,14 @@ import { getOrCreatePayee, getOrCreateTransferPayee } from '../budget/payees';
 import { insertTransaction, insertTransferPair, softDeleteTransactionCascade } from '../budget/transactions';
 import { getDb, type Db } from '../db/client';
 import { accounts, budgets, categories, importBatches, payees, transactions } from '../db/schema';
-import { IMPORT_PROVIDERS, isImportProvider, parseStatement, suggestCategoryName, type ImportProvider } from '../import';
+import {
+  IMPORT_PROVIDERS,
+  isImportProvider,
+  parseStatement,
+  providerFamily,
+  suggestCategoryName,
+  type ImportProvider,
+} from '../import';
 import { cleanPayeeName } from '../import/payee-name';
 import { matchPayeeRule, type PayeeRule } from '../import/rules';
 import { fetchStatementForImport, MAX_STATEMENT_DAYS, probeWiseApi, WiseApiError } from '../import/wise-api';
@@ -128,7 +135,11 @@ async function resolveCurrencyAccount(
       and(
         eq(accounts.budgetId, input.budgetId),
         eq(accounts.currencyCode, input.currencyCode),
-        eq(accounts.importProvider, input.provider),
+        // Family, not exact match: a "Wise CAD" account created under the
+        // CSV provider is still where an API-fetched CAD row belongs.
+        // Matching the exact string instead created a duplicate account
+        // the first time a Wise import switched to the JSON format.
+        inArray(accounts.importProvider, providerFamily(input.provider)),
         isNull(accounts.deletedAt),
       ),
     )

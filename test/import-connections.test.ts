@@ -205,3 +205,56 @@ describe('POST /imports/wise/fetch credential source', () => {
     expect(result.body.error).toBe('no_start_date');
   });
 });
+
+describe('provider families', () => {
+  it('imports an API statement into the account created for the CSV provider, rather than duplicating it', async () => {
+    // 'wise' parses the web-UI CSV export and 'wise_json' the API
+    // statement, but both describe the same balances. Matching accounts on
+    // the exact provider string meant the first API import after a switch
+    // did not recognise the existing CAD account and created a second one
+    // beside it.
+    const { app, sessionCookie, budgetId } = await signInNewUser('family@example.com');
+
+    const usd = await callJson<{ account: { id: string } }>(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Wise USD', type: 'checking', importProvider: 'wise' }),
+    });
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Wise CAD', type: 'checking', currencyCode: 'CAD', importProvider: 'wise', fxRate: '0.72' }),
+    });
+
+    // One CAD row, imported as wise_json against the USD account.
+    const statement = JSON.stringify({
+      transactions: [
+        {
+          type: 'DEBIT',
+          date: '2026-08-14T16:36:49.421391Z',
+          amount: { value: -5.62, currency: 'CAD' },
+          totalFees: { value: 0.02, currency: 'CAD' },
+          details: { type: 'CARD', description: 'Card transaction', merchant: { name: 'Usps Po' } },
+          referenceNumber: 'CARD-4193630446',
+        },
+      ],
+    });
+
+    const { body } = await callJson<{ accountsCreated: string[]; imported: number }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/imports`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId: usd.body.account.id,
+          provider: 'wise_json',
+          filename: 'wise.json',
+          csv: statement,
+        }),
+      },
+    );
+
+    // The existing "Wise CAD" absorbed it; nothing new was invented.
+    expect(body.accountsCreated).toEqual([]);
+    expect(body.imported).toBe(1);
+  });
+});

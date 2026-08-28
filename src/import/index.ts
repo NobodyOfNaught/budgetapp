@@ -60,6 +60,24 @@ const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | nu
   wise_json: wiseJsonSuggestion,
 };
 
+/**
+ * Providers that are the same institution in different clothes, so an
+ * account set up under one is the right home for a statement imported
+ * under another.
+ *
+ * Only Wise so far: 'wise' parses the web-UI CSV export and 'wise_json'
+ * the API statement, but both describe the same balances. Without this,
+ * switching an account to the API format made resolveCurrencyAccount
+ * (src/routes/imports.ts) fail to recognise the existing "Wise CAD"
+ * account and silently create a duplicate alongside it.
+ */
+const PROVIDER_FAMILIES: ImportProvider[][] = [['wise', 'wise_json']];
+
+/** Every provider whose accounts should be considered interchangeable with this one, including itself. */
+export function providerFamily(provider: ImportProvider): ImportProvider[] {
+  return PROVIDER_FAMILIES.find((family) => family.includes(provider)) ?? [provider];
+}
+
 export function isImportProvider(value: string): value is ImportProvider {
   return (IMPORT_PROVIDERS as readonly string[]).includes(value);
 }

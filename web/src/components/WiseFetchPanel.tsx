@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
+import type { ImportSummary } from '../types';
 
 /**
  * Downloads a Wise statement over the API and hands it to the import form
@@ -52,10 +53,17 @@ interface FetchedStatement {
 export function WiseFetchPanel({
   budgetId,
   onFetched,
+  onFetchedImport,
 }: {
   budgetId: string;
-  /** Hands back the statement as a file plus the provider that parses it. */
+  /** Hands back the statement as a file plus the provider that parses it, for the user to import. */
   onFetched: (file: File, provider: string) => void;
+  /**
+   * Fetch straight through to imported. Returns the summary, or null when
+   * there is no account set up for this provider to import into — the
+   * caller then falls back to loading the statement into the form.
+   */
+  onFetchedImport: (file: File, provider: string) => Promise<ImportSummary | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState('');
@@ -64,6 +72,8 @@ export function WiseFetchPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<FetchedStatement | null>(null);
+  const [imported, setImported] = useState<ImportSummary | null>(null);
+  const [needsAccount, setNeedsAccount] = useState(false);
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [keyConfigured, setKeyConfigured] = useState(true);
   const [saveLabel, setSaveLabel] = useState('');
@@ -100,10 +110,12 @@ export function WiseFetchPanel({
    * Dates are omitted rather than sent blank so the server can tell "no
    * preference" from "this exact day".
    */
-  async function run(useSaved: boolean) {
+  async function run(useSaved: boolean, thenImport = false) {
     setBusy(true);
     setError(null);
     setResult(null);
+    setImported(null);
+    setNeedsAccount(false);
     try {
       const body = useSaved
         ? { connectionId: saved?.id }
@@ -115,12 +127,26 @@ export function WiseFetchPanel({
       setResult(fetched);
       setToken('');
       if (useSaved) void loadConnections(); // refresh "last used"
-      onFetched(
-        new File([fetched.statementJson], `wise-${fetched.start}-to-${fetched.end}.json`, {
-          type: 'application/json',
-        }),
-        'wise_json',
-      );
+      const statementFile = new File([fetched.statementJson], `wise-${fetched.start}-to-${fetched.end}.json`, {
+        type: 'application/json',
+      });
+
+      if (thenImport) {
+        const summary = await onFetchedImport(statementFile, 'wise_json');
+        if (summary === null) {
+          // No account set up for Wise, so there was nothing to import
+          // into. Load the statement into the form anyway — the fetch
+          // already happened and throwing it away would mean running it
+          // again just to pick an account.
+          onFetched(statementFile, 'wise_json');
+          setNeedsAccount(true);
+        } else {
+          setImported(summary);
+        }
+        return;
+      }
+
+      onFetched(statementFile, 'wise_json');
     } catch (err) {
       setError(err instanceof ApiError ? JSON.stringify(err.body) : String(err));
     } finally {
@@ -168,7 +194,7 @@ export function WiseFetchPanel({
       <p style={{ margin: '0.5rem 0' }}>
         {saved && (
           <>
-            <button type="button" onClick={() => void run(true)} disabled={busy}>
+            <button type="button" onClick={() => void run(true, true)} disabled={busy}>
               {busy ? 'Fetching…' : 'Fetch new Wise transactions'}
             </button>{' '}
           </>
@@ -179,10 +205,18 @@ export function WiseFetchPanel({
         {error && (
           <span style={{ color: '#b00', marginLeft: '0.5rem', wordBreak: 'break-all' }}>{error}</span>
         )}
-        {result && (
+        {imported && result && (
           <span style={{ color: '#161', marginLeft: '0.5rem' }}>
-            Fetched {result.balances.reduce((sum, b) => sum + b.rowCount, 0)} transactions ({result.start} to{' '}
-            {result.end}) — pick the account below and import.
+            Imported {imported.imported} of {result.balances.reduce((sum, b) => sum + b.rowCount, 0)} fetched (
+            {result.start} to {result.end})
+            {imported.skipped.length > 0 && `, ${imported.skipped.length} skipped`}
+            {imported.accountsCreated.length > 0 && `, created ${imported.accountsCreated.join(', ')}`} — review them
+            below.
+          </span>
+        )}
+        {needsAccount && (
+          <span style={{ color: '#b00', marginLeft: '0.5rem' }}>
+            Fetched, but no account is set up for Wise — pick one below and import.
           </span>
         )}
       </p>
@@ -212,16 +246,17 @@ export function WiseFetchPanel({
                 : '· never used'}
             </span>
           </p>
-          <button type="button" onClick={() => void run(true)} disabled={busy}>
-            {busy ? 'Fetching…' : 'Fetch new transactions'}
+          <button type="button" onClick={() => void run(true, true)} disabled={busy}>
+            {busy ? 'Working…' : 'Fetch and import new transactions'}
           </button>{' '}
           <button type="button" onClick={() => void forgetConnection(saved.id)} disabled={busy}>
             Forget it
           </button>
           <p style={{ margin: '0.25rem 0 0', color: '#555' }}>
-            Fetching with the saved token picks its own dates: from the newest Wise transaction already imported, up
-            to today. It overlaps that last day on purpose — re-importing a day already held changes nothing, while
-            starting a day later would silently miss anything that posted after the last fetch ran.
+            This fetches AND imports in one go, straight to the review queue — nothing is approved until you approve
+            it. It picks its own dates: from the newest Wise transaction already imported, up to today. It overlaps
+            that last day on purpose — re-importing a day already held changes nothing, while starting a day later
+            would silently miss anything that posted after the last fetch ran.
           </p>
         </div>
       )}

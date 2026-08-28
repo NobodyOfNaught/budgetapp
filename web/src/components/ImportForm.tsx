@@ -219,22 +219,31 @@ export function ImportForm({
   const canSubmit =
     !!file && !!accountId && !inspecting && (!needsMembers || selectedMembers.size > 0) && (!fxRateRequired || !!fxRate.trim());
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!file || !accountId) return;
+  /**
+   * Posts one import. Takes the file, provider and account EXPLICITLY
+   * rather than reading them from state, because the one-click Wise path
+   * has just received them and React state updates are not visible in the
+   * same tick — going through state there would import the previous file,
+   * or nothing at all.
+   */
+  async function runImport(input: { importFile: File; importProvider: string; importAccountId: string }) {
+    const { importFile, importProvider, importAccountId } = input;
+    const account = importable.find((a) => a.id === importAccountId);
+    const foreign = !!account && account.currencyCode !== budgetCurrencyCode;
+
     setSubmitting(true);
     setError(null);
     try {
-      const csv = await file.text();
+      const csv = await importFile.text();
       const result = await apiFetch<ImportSummary>(`/budgets/${budgetId}/imports`, {
         method: 'POST',
         body: JSON.stringify({
-          accountId,
-          provider,
-          filename: file.name,
+          accountId: importAccountId,
+          provider: importProvider,
+          filename: importFile.name,
           csv,
           ...(needsMembers ? { options: { members: [...selectedMembers] } } : {}),
-          ...(isForeignAccount && fxRate.trim() ? { fxRate: fxRate.trim() } : {}),
+          ...(foreign && fxRate.trim() ? { fxRate: fxRate.trim() } : {}),
           // Sent only when the user actually changed it, so an untouched
           // form never rewrites the stored value. null clears it, which is
           // why this is an explicit comparison and not a truthiness check.
@@ -244,11 +253,19 @@ export function ImportForm({
       setSummary(result);
       onImported(result);
       loadHistory();
+      return result;
     } catch (err) {
       setError(importErrorMessage(err));
+      return null;
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!file || !accountId) return;
+    await runImport({ importFile: file, importProvider: provider, importAccountId: accountId });
   }
 
   async function handleUndo(batchId: string) {
@@ -417,6 +434,38 @@ export function ImportForm({
             setFile(fetchedFile);
             setProvider(fetchedProvider);
             setProviderPinned(true);
+          }}
+          /**
+           * The one-click path: fetch straight through to imported, no
+           * account to pick and no second button. Returns the summary so
+           * the panel can say what landed, or null when there is no
+           * account to import into — in which case the caller falls back
+           * to loading the statement into the form.
+           */
+          onFetchedImport={async (fetchedFile, fetchedProvider) => {
+            // Anchor on an account already set up for this provider's
+            // family. It is only the ANCHOR: the import routes each row to
+            // the account matching its own currency (resolveCurrencyAccount
+            // in src/routes/imports.ts), so picking either Wise account
+            // lands CAD and USD rows correctly.
+            const family = fetchedProvider === 'wise_json' ? ['wise', 'wise_json'] : [fetchedProvider];
+            const candidates = importable.filter((a) => a.importProvider && family.includes(a.importProvider));
+            // Prefer the one in the budget's own currency. Any of them
+            // routes the rows correctly, but a foreign anchor drags in the
+            // exchange-rate rules for no reason, so which one is picked
+            // should not depend on account ordering.
+            const anchor = candidates.find((a) => a.currencyCode === budgetCurrencyCode) ?? candidates[0];
+            if (!anchor) return null;
+
+            setFile(fetchedFile);
+            setProvider(fetchedProvider);
+            setProviderPinned(true);
+            setAccountId(anchor.id);
+            return runImport({
+              importFile: fetchedFile,
+              importProvider: fetchedProvider,
+              importAccountId: anchor.id,
+            });
           }}
         />
         <div>

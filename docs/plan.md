@@ -1242,6 +1242,19 @@ of those is harmless and the other is a hole in the ledger, so it overlaps on pu
 nothing imported yet it falls back to the budget's cutoff, and failing that asks for an
 explicit start rather than inventing a start of history.
 
+**One click means imported, not fetched.** The button runs the fetch, then the import,
+landing rows in the review queue — nothing is approved without the user approving it. It
+anchors on an account already set up for the provider's family, preferring one in the
+budget's own currency so the choice does not depend on account ordering; the anchor is
+only a starting point, since `resolveCurrencyAccount` routes each row to the account
+matching its own currency. With no such account it falls back to loading the statement
+into the form rather than discarding a fetch that already happened.
+
+The import is posted through a `runImport` that takes the file, provider and account
+EXPLICITLY rather than reading them from React state, because the one-click path has just
+received them and a state update is not visible in the same tick — going through state
+there would import the previous file, or nothing.
+
 Still not in this PR: any schedule. A cron trigger is now a small step (the credential and
 the range both resolve server-side), but running unattended is worth doing only after the
 manual button has been exercised against real data.

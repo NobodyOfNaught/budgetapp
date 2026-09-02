@@ -329,10 +329,14 @@ describe('currency', () => {
 });
 
 describe('payee', () => {
-  it('passes NAME through verbatim as both raw and name', () => {
+  it('passes NAME through verbatim as both raw and name when there is no MEMO', () => {
     // There is no OFX-specific vocabulary to strip — the format is shared
     // across institutions. Generic cleanup is the route layer's
     // cleanPayeeName; anything bank-specific is a payee_rule.
+    //
+    // This holds for the Chase file specifically because it carries no
+    // MEMO on any row. A bank that DOES (see the AACU block below) splits
+    // the two fields differently.
     const rows = ordinaries(parseOfx(REAL_FILE));
     const audible = rows.find((r) => r.date === '2026-08-18')!;
     expect(audible.payeeRaw).toBe('Audible*MG7XU1053');
@@ -437,5 +441,69 @@ describe('the real 14-transaction Chase export', () => {
     const dates = ordinaries(parseOfx(REAL_FILE)).map((r) => r.date);
     expect(dates[0]).toBe('2026-08-20');
     expect(dates[dates.length - 1]).toBe('2026-07-10');
+  });
+});
+
+describe('banks that truncate NAME and put the fuller text in MEMO', () => {
+  // Every string here is transcribed verbatim from a real AACU (American
+  // Airlines Credit Union) QFX export of 757 transactions. Across that file
+  // MEMO was longer than NAME on 754 rows, NAME was never longer, MEMO
+  // always began with NAME's text, and NAME capped at 36 characters against
+  // MEMO's 58.
+  //
+  // That is not cosmetic. payee_rules match payeeRaw (src/import/rules.ts),
+  // and AACU spends NAME's whole width on a type prefix and a POS reference
+  // before the merchant even starts — so with NAME as payeeRaw, the user's
+  // existing "Ken Roesel" rule matched 0 rows of this file instead of 4,
+  // and a rule for their AmericanAirlines payroll would have matched 0
+  // instead of 83.
+  const aacuRow = (name: string, memo: string) =>
+    ordinaries(parseOfx(oneTransaction(`<DTPOSTED>20260901\n<TRNAMT>-29.15\n<FITID>F1\n<NAME>${name}\n<MEMO>${memo}`)))[0]!;
+
+  it('uses the fuller MEMO as payeeRaw, so a rule can match the whole description', () => {
+    const row = aacuRow(
+      'Withdrawal POS #090108228049 GOO',
+      'Withdrawal POS #090108228049 GOOGLE *Workspace_kristin',
+    );
+    expect(row.payeeRaw).toBe('Withdrawal POS #090108228049 GOOGLE *Workspace_kristin');
+    // The merchant is cut off mid-word in NAME — "GOO" — which no rule can
+    // usefully match on.
+    expect(row.payeeRaw).toContain('GOOGLE');
+  });
+
+  it('leaves payeeName null when NAME is only a truncation, so the heuristic sees the whole string', () => {
+    // resolveImportPayee falls back to payeeRaw when payeeName is null, so
+    // cleanPayeeName runs over the full description rather than a fragment
+    // that stops mid-merchant.
+    const row = aacuRow(
+      'ACH Deposit:  Deposit ACH AMERIC',
+      'ACH Deposit: Deposit ACH AMERICANAIRLINES TYPE: PAYROL',
+    );
+    expect(row.payeeName).toBeNull();
+    expect(row.payeeRaw).toContain('AMERICANAIRLINES');
+  });
+
+  it('treats a differing-whitespace NAME as a truncation, not a different rendering', () => {
+    // AACU writes "ACH Deposit:  Deposit" in NAME and "ACH Deposit: Deposit"
+    // in MEMO — two spaces against one. Comparing raw strings would call
+    // that a genuinely different name and keep the truncated version.
+    const row = aacuRow('ACH  Deposit  Wise I', 'ACH Deposit Wise Inc TYPE: WISE ID: 45323');
+    expect(row.payeeName).toBeNull();
+  });
+
+  it('keeps NAME as the clean name when MEMO is a genuinely different string', () => {
+    // The case the original behaviour was written for: MEMO is a reference
+    // note rather than a longer rendering of the same description, so NAME
+    // really is the bank's tidier merchant field and is worth keeping.
+    const row = aacuRow('SHOPRITE 401', 'Reference 12345 authorisation code 99');
+    expect(row.payeeName).toBe('SHOPRITE 401');
+    expect(row.payeeRaw).toBe('Reference 12345 authorisation code 99');
+  });
+
+  it('falls back to NAME for the rows that carry no MEMO at all', () => {
+    // 3 of the 757 real AACU rows have none.
+    const row = ordinaries(parseOfx(oneTransaction('<DTPOSTED>20260901\n<TRNAMT>-1.00\n<FITID>F2\n<NAME>Service Charge')))[0]!;
+    expect(row.payeeRaw).toBe('Service Charge');
+    expect(row.payeeName).toBe('Service Charge');
   });
 });

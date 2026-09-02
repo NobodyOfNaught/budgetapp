@@ -1197,6 +1197,44 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 28 — AACU moves to QFX, and OFX stops truncating the payee
+
+No new parser: the `ofx` provider already reads AACU's QFX export cleanly — 757
+transactions, zero skipped, every `FITID` unique. Switching the account is a settings
+change, not code.
+
+What the file did expose is a defect in how `ofx` split `<NAME>` and `<MEMO>`. It treated
+`<NAME>` as the merchant field and put it in BOTH `payeeRaw` and `payeeName`. That reading
+does not survive real files: across this export `<MEMO>` was longer on 754 of 757 rows,
+`<NAME>` was never longer, `<MEMO>` always began with `<NAME>`'s text, and `<NAME>` capped
+at 36 characters against `<MEMO>`'s 58. `<NAME>` is a truncation, not a tidier name.
+
+That matters because payee_rules match `payeeRaw`, and AACU spends `<NAME>`'s entire width
+on a transaction-type prefix and a POS reference before the merchant begins — "Withdrawal
+POS #090108228049 GOO". Measured against the user's real rules and this real file, the
+old behaviour would have matched their existing **"Ken Roesel" rule on 0 rows instead of
+4**, and a rule for their AmericanAirlines payroll on **0 instead of 83**.
+
+So `resolvePayeeFields` now puts the FULLER of the two fields in `payeeRaw`, and leaves
+`payeeName` null when `<NAME>` is merely a prefix-truncation of `<MEMO>` (compared on
+collapsed whitespace, since AACU writes "ACH Deposit:  Deposit" against "ACH Deposit:
+Deposit") — so the route layer's cleanPayeeName heuristic runs over the whole description
+rather than a fragment stopping mid-merchant. When `<MEMO>` is a genuinely different
+string, `<NAME>` is kept as the clean name, which is the case the original behaviour was
+written for. The Chase export is unaffected: it carries no `<MEMO>` on any row.
+
+**Switching the account is not just flipping the provider.** AACU's CSV-imported history
+keys on a content hash (`2026-08-14|-3728|Withdrawal POS #…|0`) while QFX rows key on
+`fitid|…`, so the 53 already-imported rows in the overlapping window would import a second
+time — the same hazard the Simplii switch hit. The existing rows have to go first.
+
+The QFX also carries `<LEDGERBAL>` — $419.66 as of 2026-09-01 — which makes the result
+checkable rather than assumed: 59 rows fall on or after the budget's 2026-07-01 cutoff and
+sum to $82.92, and the account's existing opening balance is $336.74. 336.74 + 82.92 =
+419.66 exactly, which independently confirms both the opening balance and the parser's
+arithmetic over the whole window.
+
+
 ### PR 27 — Stored provider credentials, and a one-click refresh
 
 The fetch (PR 26) needed the token pasted every time, which is not a refresh button. This

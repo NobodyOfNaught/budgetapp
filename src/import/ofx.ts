@@ -99,6 +99,46 @@ function statementBlocks(text: string): string[] {
   return [...text.matchAll(/<(CC)?STMTRS>([\s\S]*?)<\/(?:CC)?STMTRS>/gi)].map((m) => m[2]!);
 }
 
+/** Whitespace-collapsed and lowercased, for comparing two renderings of the same description. */
+function normalise(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Splits `<NAME>` and `<MEMO>` into the parser contract's two fields.
+ *
+ * The naive reading — `<NAME>` is the merchant, `<MEMO>` is a note — does
+ * not survive contact with real files. Banks routinely truncate `<NAME>` to
+ * a fixed width and put the fuller description in `<MEMO>`: across a real
+ * AACU export of 757 rows, `<MEMO>` was longer on 754 of them, `<NAME>` was
+ * never longer, and `<MEMO>` always began with `<NAME>`'s text. `<NAME>`
+ * capped at 36 characters, `<MEMO>` at 58.
+ *
+ * That matters more than cosmetics, because payee_rules match `payeeRaw`
+ * (src/import/rules.ts). With `<NAME>` there, an AACU card purchase reads
+ * "Withdrawal POS #090108228049 GOO" — the type prefix and POS reference
+ * eat the width and the merchant is cut off mid-word, so a rule for a
+ * merchant name cannot match at all. So:
+ *
+ * - `payeeRaw` is whichever field is FULLER. It is the contract's "full raw
+ *   description", and it is what rules get to see.
+ * - `payeeName` is `<NAME>` only when it is a genuinely different, shorter
+ *   rendering. When it is merely a prefix-truncation of `<MEMO>`, it is left
+ *   null so the route layer's cleanPayeeName heuristic runs over the whole
+ *   description instead of a fragment that stops mid-merchant.
+ */
+export function resolvePayeeFields(
+  name: string | null,
+  memo: string | null,
+): { payeeRaw: string | null; payeeName: string | null } {
+  if (!memo) return { payeeRaw: name ?? null, payeeName: name ?? null };
+  if (!name) return { payeeRaw: memo, payeeName: null };
+
+  const truncated = normalise(memo).startsWith(normalise(name));
+  const fuller = memo.length >= name.length ? memo : name;
+  return { payeeRaw: fuller, payeeName: truncated ? null : name };
+}
+
 export function parseOfx(fileText: string): ParseResult {
   const rows: ParsedRow[] = [];
   const skipped: SkippedRow[] = [];
@@ -168,13 +208,8 @@ export function parseOfx(fileText: string): ParseResult {
     const currencyCode = tagValue(block, 'CURSYM') ?? statementCurrency;
     currencies.add(currencyCode);
 
-    // <NAME> is the bank's own merchant field and already reasonably
-    // clean, so — like Wise — payeeName is set equal to payeeRaw rather
-    // than run through any OFX-specific stripping. There IS no OFX-specific
-    // vocabulary to strip: the format is shared across institutions, so
-    // anything worth cutting is either generic (the shared cleanPayeeName
-    // heuristic at the route layer) or bank-specific (a payee_rule).
-    const payee = name ?? null;
+    const memo = tagValue(block, 'MEMO');
+    const { payeeRaw, payeeName } = resolvePayeeFields(name, memo);
 
     rows.push({
       kind: 'ordinary',
@@ -182,9 +217,9 @@ export function parseOfx(fileText: string): ParseResult {
       date,
       amountMinor,
       currencyCode,
-      payeeRaw: payee,
-      payeeName: payee,
-      memo: tagValue(block, 'MEMO'),
+      payeeRaw,
+      payeeName,
+      memo,
       providerCategory: null,
     });
   });

@@ -1362,3 +1362,109 @@ VERSION:102
     expect(body.beforeCutoff).toBe(1);
   });
 });
+
+describe('reconciliation against the bank’s own LEDGERBAL', () => {
+  // A minimal QFX carrying two rows and a stated balance, so an import can
+  // be checked against what the institution says the account holds.
+  function qfx(balance: string, ...rows: string[]): string {
+    return `<OFX><BANKMSGSRSV1><STMTRS>
+<CURDEF>USD
+<BANKACCTFROM><ACCTID>999</BANKACCTFROM>
+<BANKTRANLIST>
+${rows.join('\n')}
+</BANKTRANLIST>
+<LEDGERBAL><BALAMT>${balance}<DTASOF>20260901</LEDGERBAL>
+</STMTRS></BANKMSGSRSV1></OFX>`;
+  }
+  const ROW_A = '<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260801<TRNAMT>-40.00<FITID>A1<NAME>SHOP</STMTTRN>';
+  const ROW_B = '<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260802<TRNAMT>100.00<FITID>B1<NAME>PAYROLL</STMTTRN>';
+
+  interface Reconciliation {
+    accountName: string;
+    statementBalanceMinor: number;
+    accountBalanceMinor: number;
+    differenceMinor: number;
+    currencyCode: string;
+    asOfDate: string | null;
+    rowsHeldBackByCutoff: number;
+  }
+
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Chequing', type: 'checking' });
+    return { app, sessionCookie, budgetId, accountId: account.account.id };
+  }
+
+  async function importQfx(
+    app: App,
+    cookie: string,
+    budgetId: string,
+    accountId: string,
+    text: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    return callJson<{ reconciliation: Reconciliation | null }>(app, cookie, `/api/v1/budgets/${budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId, provider: 'ofx', filename: 'x.qfx', csv: text, ...extra }),
+    });
+  }
+
+  it('reports a clean match when the rows add up to what the bank says', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('recon-match@example.com');
+    // -40.00 + 100.00 = 60.00, which is what the file states.
+    const { body } = await importQfx(app, sessionCookie, budgetId, accountId, qfx('60.00', ROW_A, ROW_B));
+
+    expect(body.reconciliation).toEqual({
+      accountName: 'Chequing',
+      statementBalanceMinor: 6000,
+      accountBalanceMinor: 6000,
+      differenceMinor: 0,
+      currencyCode: 'USD',
+      asOfDate: '2026-09-01',
+      rowsHeldBackByCutoff: 0,
+    });
+  });
+
+  it('catches a double import, where the same rows land twice under different ids', async () => {
+    // The failure this check exists for. Re-importing the SAME transactions
+    // with different FITIDs — which is exactly what switching a bank from
+    // CSV to QFX does — doubles the balance, and nothing else in the import
+    // summary would say so: row counts, dedupe and skips all look normal
+    // because from each import's own point of view they were.
+    const { app, sessionCookie, budgetId, accountId } = await setup('recon-double@example.com');
+    await importQfx(app, sessionCookie, budgetId, accountId, qfx('60.00', ROW_A, ROW_B));
+
+    const second = qfx(
+      '60.00',
+      ROW_A.replace('<FITID>A1', '<FITID>A2'),
+      ROW_B.replace('<FITID>B1', '<FITID>B2'),
+    );
+    const { body } = await importQfx(app, sessionCookie, budgetId, accountId, second);
+
+    expect(body.reconciliation?.accountBalanceMinor).toBe(12000);
+    expect(body.reconciliation?.statementBalanceMinor).toBe(6000);
+    expect(body.reconciliation?.differenceMinor).toBe(6000);
+  });
+
+  it('reports the cutoff count alongside, since a held-back row explains a gap innocently', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('recon-cutoff@example.com');
+    // ROW_A (Aug 1) is held back; only ROW_B lands, so the account is 40.00
+    // short of the bank — correctly, and the count says why.
+    const { body } = await importQfx(app, sessionCookie, budgetId, accountId, qfx('60.00', ROW_A, ROW_B), {
+      cutoffDate: '2026-08-02',
+    });
+
+    expect(body.reconciliation?.accountBalanceMinor).toBe(10000);
+    expect(body.reconciliation?.differenceMinor).toBe(4000);
+    expect(body.reconciliation?.rowsHeldBackByCutoff).toBe(1);
+  });
+
+  it('is null for a format that states no balance', async () => {
+    // Every CSV provider. Absent, not zero — a fabricated zero would read
+    // as the bank contradicting a correct import.
+    const { app, sessionCookie, budgetId } = await signInNewUser('recon-csv@example.com');
+    const account = await createAccount(app, sessionCookie, budgetId, { name: 'Wise', type: 'checking' });
+    const { body } = await importCsv(app, sessionCookie, budgetId, account.account.id, csv(GIANT_FOOD));
+    expect((body as unknown as { reconciliation: Reconciliation | null }).reconciliation).toBeNull();
+  });
+});

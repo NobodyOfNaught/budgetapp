@@ -507,3 +507,67 @@ describe('banks that truncate NAME and put the fuller text in MEMO', () => {
     expect(row.payeeName).toBe('Service Charge');
   });
 });
+
+describe('LEDGERBAL — the balance the institution itself reports', () => {
+  const withBalance = (balanceBlock: string) =>
+    `<OFX><BANKMSGSRSV1><STMTRS>
+<CURDEF>CAD
+<BANKACCTFROM><ACCTID>123</BANKACCTFROM>
+<BANKTRANLIST>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260820<TRNAMT>-10.00<FITID>F1<NAME>SHOP</STMTTRN>
+</BANKTRANLIST>
+${balanceBlock}
+</STMTRS></BANKMSGSRSV1></OFX>`;
+
+  it('reads a closed-tag LEDGERBAL, as AACU writes it', () => {
+    // Verbatim shape from the real AACU export.
+    const result = parseOfx(
+      withBalance('<LEDGERBAL><BALAMT>419.66</BALAMT><DTASOF>20260901192759.000[-5:GMT]</DTASOF></LEDGERBAL>'),
+    );
+    expect(result.statementBalance).toEqual({ amountMinor: 41966, currencyCode: 'CAD', asOfDate: '2026-09-01' });
+  });
+
+  it('reads an unclosed-tag LEDGERBAL, as Simplii writes it', () => {
+    // Verbatim shape from the real Simplii export — no closing tags at all,
+    // and AVAILBAL follows immediately. This is why the block is bounded by
+    // "</LEDGERBAL> or <AVAILBAL> or end", not by a closing tag alone.
+    const result = parseOfx(
+      withBalance('<LEDGERBAL><BALAMT>0.00<DTASOF>20260824104521</LEDGERBAL><AVAILBAL><BALAMT>0.00<DTASOF>20260824104521</AVAILBAL>'),
+    );
+    expect(result.statementBalance).toEqual({ amountMinor: 0, currencyCode: 'CAD', asOfDate: '2026-08-24' });
+  });
+
+  it('takes LEDGERBAL and never AVAILBAL', () => {
+    // The real AACU file reports 419.66 ledger against 395.49 available on
+    // the same instant: available nets out holds that have no transaction
+    // rows yet, so it can never agree with a sum of rows.
+    const result = parseOfx(
+      withBalance(
+        '<LEDGERBAL><BALAMT>419.66</BALAMT><DTASOF>20260901</DTASOF></LEDGERBAL>' +
+          '<AVAILBAL><BALAMT>395.49</BALAMT><DTASOF>20260901</DTASOF></AVAILBAL>',
+      ),
+    );
+    expect(result.statementBalance?.amountMinor).toBe(41966);
+  });
+
+  it('carries a negative balance through, for a card that owes money', () => {
+    const result = parseOfx(withBalance('<LEDGERBAL><BALAMT>-6026.98<DTASOF>20260821</LEDGERBAL>'));
+    expect(result.statementBalance?.amountMinor).toBe(-602698);
+  });
+
+  it('is absent when the file has no LEDGERBAL, rather than defaulting to zero', () => {
+    // A fabricated zero would read as "the bank says you have nothing",
+    // which would then contradict a perfectly correct import.
+    expect(parseOfx(withBalance('')).statementBalance).toBeUndefined();
+  });
+
+  it('is absent when the amount is unreadable, rather than guessed at', () => {
+    expect(parseOfx(withBalance('<LEDGERBAL><BALAMT>not a number<DTASOF>20260821</LEDGERBAL>')).statementBalance)
+      .toBeUndefined();
+  });
+
+  it('reports a null date rather than dropping the balance when DTASOF is missing', () => {
+    const result = parseOfx(withBalance('<LEDGERBAL><BALAMT>12.34</LEDGERBAL>'));
+    expect(result.statementBalance).toEqual({ amountMinor: 1234, currencyCode: 'CAD', asOfDate: null });
+  });
+});

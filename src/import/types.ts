@@ -79,6 +79,25 @@ export interface ParseResult {
    * providers where the concept doesn't apply (Wise, BECU).
    */
   participants?: string[];
+  /**
+   * The balance the institution itself reports at the end of the
+   * statement, when the format carries one — OFX/QFX's `<LEDGERBAL>`, and
+   * Wise's `endOfStatementBalance`.
+   *
+   * This is the only field in a parse result that describes a STATE rather
+   * than a movement, and it is what makes an import checkable: the rows say
+   * what changed, this says what the account should hold once they land.
+   * Undefined for the CSV formats, which carry no balance at all.
+   */
+  statementBalance?: StatementBalance;
+}
+
+export interface StatementBalance {
+  /** Signed, in `currencyCode`'s minor units. Negative is a credit-card balance owed, or an overdrawn account. */
+  amountMinor: number;
+  currencyCode: string;
+  /** 'YYYY-MM-DD' the institution stamped it, or null when the format gave no usable date. */
+  asOfDate: string | null;
 }
 
 /**

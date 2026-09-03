@@ -2,7 +2,79 @@ import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
 import { IMPORT_PROVIDER_OPTIONS } from '../providers';
 import { WiseFetchPanel } from './WiseFetchPanel';
-import type { Account, BudgetDetail, ImportBatch, ImportSummary, UndoImportResult } from '../types';
+import type {
+  Account,
+  BudgetDetail,
+  ImportBatch,
+  ImportReconciliation,
+  ImportSummary,
+  UndoImportResult,
+} from '../types';
+
+/**
+ * Reports the account's balance after an import against the balance the
+ * BANK stated in the same file.
+ *
+ * Every other number in the summary checks the import against itself — how
+ * many rows, how many duplicates, what was skipped. This is the only one
+ * that checks it against the institution, so it is the only one that can
+ * catch a row that never arrived, a row that arrived twice, or a missing
+ * opening balance.
+ *
+ * Phrased as a discrepancy to look into rather than an error, because a
+ * gap is often correct: an import cutoff holds back older rows, and an
+ * account whose history starts later than the bank's will never agree. The
+ * cutoff count is shown alongside precisely so the likeliest innocent
+ * explanation is visible next to the number.
+ */
+/**
+ * A plain decimal, no currency symbol — the caller prints the code itself.
+ * Deliberately not one of the `$`-prefixing formatters elsewhere in the
+ * app: this renders whatever currency the imported account is in, and "$"
+ * on a CAD balance would be wrong.
+ */
+function formatAmount(minor: number): string {
+  const sign = minor < 0 ? '-' : '';
+  const abs = Math.abs(minor);
+  return `${sign}${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, '0')}`;
+}
+
+function ReconciliationNote({ reconciliation }: { reconciliation: ImportReconciliation }) {
+  const { differenceMinor, statementBalanceMinor, accountBalanceMinor, currencyCode, asOfDate } = reconciliation;
+  const asOf = asOfDate ? ` as of ${asOfDate}` : '';
+
+  if (differenceMinor === 0) {
+    return (
+      <p style={{ color: '#161' }}>
+        Balance matches the bank: {formatAmount(statementBalanceMinor)} {currencyCode}
+        {asOf}.
+      </p>
+    );
+  }
+
+  return (
+    <div style={{ border: '1px solid #b8860b', background: '#fffbe6', padding: '0.5rem', marginBlock: '0.5rem' }}>
+      <p style={{ margin: 0 }}>
+        <strong>Balance doesn&apos;t match the bank.</strong> {reconciliation.accountName} totals{' '}
+        {formatAmount(accountBalanceMinor)} {currencyCode}; the file says {formatAmount(statementBalanceMinor)}{' '}
+        {currencyCode}
+        {asOf} — a difference of {formatAmount(Math.abs(differenceMinor))} {currencyCode}.
+      </p>
+      <p style={{ margin: '0.35rem 0 0', fontSize: '0.85rem', color: '#555' }}>
+        {reconciliation.rowsHeldBackByCutoff > 0 ? (
+          <>
+            {reconciliation.rowsHeldBackByCutoff} row
+            {reconciliation.rowsHeldBackByCutoff === 1 ? ' was' : 's were'} held back by the import cutoff, which
+            explains a gap on its own. Otherwise check for
+          </>
+        ) : (
+          <>Check for</>
+        )}{' '}
+        a missing opening balance, transactions imported twice, or rows the file didn&apos;t cover.
+      </p>
+    </div>
+  );
+}
 
 /** The account's saved import_options.members, if any — see migrations/0006 and src/routes/imports.ts. */
 function savedMembers(account: Account | undefined): string[] {
@@ -360,6 +432,7 @@ export function ImportForm({
             <strong>{summary.beforeCutoff}</strong> held back as older than the {summary.cutoffDate} cutoff.
           </p>
         )}
+        {summary.reconciliation && <ReconciliationNote reconciliation={summary.reconciliation} />}
         {summary.skipped.length > 0 && (
           <>
             <p style={{ marginBottom: '0.25rem' }}>Skipped {summary.skipped.length}:</p>

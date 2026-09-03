@@ -40,7 +40,7 @@
 // Pure: no I/O, no DB, no Cloudflare imports.
 
 import { parseAmountToMinor } from '../lib/money';
-import type { ParsedRow, ParseResult, SkippedRow } from './types';
+import type { ParsedRow, ParseResult, SkippedRow, StatementBalance } from './types';
 
 /**
  * OFX has no category concept at all — no provider label to map. Same as
@@ -224,5 +224,50 @@ export function parseOfx(fileText: string): ParseResult {
     });
   });
 
-  return { rows, skipped, currencies: [...currencies].sort(), rowCount };
+  return {
+    rows,
+    skipped,
+    currencies: [...currencies].sort(),
+    rowCount,
+    ...(statementBalance(statement, statementCurrency) ?? {}),
+  };
+}
+
+/**
+ * `<LEDGERBAL>` — what the institution says the account held when it
+ * produced the file. Absent from plenty of exports, so it is optional
+ * rather than assumed.
+ *
+ * Deliberately NOT `<AVAILBAL>`, which the same files also carry: available
+ * balance nets out holds and pending authorisations that have no
+ * transaction rows yet, so it can never agree with a sum of rows. The real
+ * AACU file shows the gap plainly — LEDGERBAL 419.66 against AVAILBAL
+ * 395.49 on the same instant.
+ */
+function statementBalance(
+  statement: string,
+  statementCurrency: string,
+): { statementBalance: StatementBalance } | null {
+  const block = /<LEDGERBAL>([\s\S]*?)(?:<\/LEDGERBAL>|<AVAILBAL>|$)/i.exec(statement)?.[1];
+  if (!block) return null;
+
+  const raw = tagValue(block, 'BALAMT');
+  if (raw === null) return null;
+  let amountMinor: number;
+  try {
+    amountMinor = parseAmountToMinor(raw);
+  } catch {
+    // A balance we cannot read is reported as absent rather than guessed
+    // at — a wrong figure here would contradict a correct import.
+    return null;
+  }
+
+  const asOf = tagValue(block, 'DTASOF');
+  return {
+    statementBalance: {
+      amountMinor,
+      currencyCode: statementCurrency,
+      asOfDate: asOf ? toIsoDate(asOf) : null,
+    },
+  };
 }

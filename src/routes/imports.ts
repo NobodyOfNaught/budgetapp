@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/sqlite-core';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -163,6 +163,60 @@ async function resolveCurrencyAccount(
     updatedAt: now,
   });
   return { id, name, created: true };
+}
+
+/**
+ * Compares the account's balance after an import against the balance the
+ * INSTITUTION reported in the same file (OFX/QFX's `<LEDGERBAL>`).
+ *
+ * This is the only end-to-end check available on an import. Everything
+ * else — row counts, dedupe, skip reasons — verifies the import against
+ * itself; this verifies it against the bank. A mismatch means the account
+ * holds a different set of transactions than the bank thinks it does:
+ * rows missed, rows imported twice, or no opening balance.
+ *
+ * Reported, never enforced. There are entirely legitimate reasons for a
+ * gap — most obviously the import cutoff holding back older rows, and an
+ * account whose history simply starts later than the bank's — so this
+ * returns the numbers and lets the user judge, rather than failing an
+ * import that may be perfectly correct. `beforeCutoff` travels with it
+ * precisely so the UI can say which of those is in play.
+ *
+ * Null when the format carries no balance (every CSV provider), or when
+ * its currency is not the account's — a figure in the wrong currency
+ * compared against a total in another is worse than no figure at all.
+ */
+async function reconcileAgainstStatement(
+  db: Db,
+  account: { id: string; name: string; currencyCode: string },
+  statementBalance: { amountMinor: number; currencyCode: string; asOfDate: string | null } | undefined,
+  beforeCutoff: number,
+): Promise<{
+  accountName: string;
+  statementBalanceMinor: number;
+  accountBalanceMinor: number;
+  differenceMinor: number;
+  currencyCode: string;
+  asOfDate: string | null;
+  rowsHeldBackByCutoff: number;
+} | null> {
+  if (!statementBalance || statementBalance.currencyCode !== account.currencyCode) return null;
+
+  const [totals] = await db
+    .select({ balanceMinor: sql<number>`COALESCE(SUM(${transactions.amountMinor}), 0)` })
+    .from(transactions)
+    .where(and(eq(transactions.accountId, account.id), isNull(transactions.deletedAt)));
+
+  const accountBalanceMinor = totals?.balanceMinor ?? 0;
+  return {
+    accountName: account.name,
+    statementBalanceMinor: statementBalance.amountMinor,
+    accountBalanceMinor,
+    differenceMinor: accountBalanceMinor - statementBalance.amountMinor,
+    currencyCode: account.currencyCode,
+    asOfDate: statementBalance.asOfDate,
+    rowsHeldBackByCutoff: beforeCutoff,
+  };
 }
 
 /** Plain YYYY-MM-DD, the only date shape any query param in this app accepts. */
@@ -878,6 +932,7 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
       cutoffDate: effectiveCutoffDate ?? null,
       skipped: parseResult.skipped,
       accountsCreated: [...accountByCurrency.values()].filter((a) => a.created).map((a) => a.name),
+      reconciliation: await reconcileAgainstStatement(db, primaryAccount, parseResult.statementBalance, beforeCutoff),
     },
     201,
   );

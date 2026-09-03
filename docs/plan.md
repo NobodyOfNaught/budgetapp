@@ -1197,6 +1197,48 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 29 — An import now says whether the account balances
+
+Every import so far reported only what it did — imported N, skipped M — and nothing about
+whether the result was *right*. That is a real gap, because the two ways an import goes
+wrong silently are both invisible in those counts: rows that arrive twice under different
+ids (the Simplii CSV→QFX switch, and the AACU switch about to happen), and a window that
+starts after money already moved, leaving an opening balance that nobody ever checked.
+
+The fix is to use the number the institution already puts in the file. OFX/QFX carries
+`<LEDGERBAL>`; the import response now includes a `reconciliation` block comparing it
+against the sum of the account's transactions after the import, and the UI prints a warning
+when they disagree.
+
+**`<LEDGERBAL>`, deliberately, not `<AVAILBAL>`.** Available balance nets out authorization
+holds, which have no transaction rows behind them, so it can *never* agree with a sum of
+rows — AACU's own file reports 419.66 ledger against 395.49 available at the same instant.
+Reconciling against available would fire a false warning on every import from a card with a
+pending charge.
+
+The parse is bounded by `</LEDGERBAL>|<AVAILBAL>|end-of-file` rather than requiring a
+closing tag, because Simplii writes unclosed SGML-style OFX where `<LEDGERBAL>` is followed
+directly by `<AVAILBAL>`. Verified against all three real files on hand: AACU
+`41966 / 2026-09-01`, Simplii `0 / 2026-08-24`, Chase `-602698 / 2026-08-21`.
+
+Two guards on when the check runs at all. It is skipped when the statement's currency is not
+the account's, since summing one currency's rows against another's balance compares nothing.
+And the response reports `rowsHeldBackByCutoff` alongside the difference, because a budget
+cutoff legitimately holds back rows the statement counted — a difference on an account with
+held-back rows is expected, and the note says so rather than crying wolf.
+
+**What this does not catch, stated plainly:** the Simplii double-import that prompted the
+question. Those duplicate rows were an equal debit and credit pair, so they cancel — the
+bank says $0.00, the app says $0.00, and the check passes. It catches a doubled *balance*,
+not doubled rows that happen to net to zero. The end-to-end test named "catches a double
+import, where the same rows land twice under different ids" pins the case it does catch: the
+same rows re-imported under fresh FITIDs, app balance 12000 against a statement's 6000.
+
+`ParseResult.statementBalance` is the first field there describing a state rather than a
+movement, which is why it sits apart from the row list. Wise's `endOfStatementBalance` fits
+the same shape and is the obvious next provider to wire in; the CSV formats carry no balance
+at all and simply return undefined, leaving the check inert rather than wrong.
+
 ### PR 28 — AACU moves to QFX, and OFX stops truncating the payee
 
 No new parser: the `ofx` provider already reads AACU's QFX export cleanly — 757

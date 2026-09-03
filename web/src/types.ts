@@ -199,6 +199,18 @@ export interface ImportSkippedRow {
   reason: string;
 }
 
+export interface ImportReconciliation {
+  accountName: string;
+  statementBalanceMinor: number;
+  accountBalanceMinor: number;
+  /** account minus statement. Zero means the two agree exactly. */
+  differenceMinor: number;
+  currencyCode: string;
+  asOfDate: string | null;
+  /** Rows the cutoff held back, which is the most common innocent explanation for a difference. */
+  rowsHeldBackByCutoff: number;
+}
+
 export interface ImportSummary {
   batchId: string;
   rowCount: number;
@@ -214,6 +226,13 @@ export interface ImportSummary {
   skipped: ImportSkippedRow[];
   /** Currency sub-accounts the file turned out to need, created on the fly. */
   accountsCreated: string[];
+  /**
+   * The account's balance after the import against the balance the bank
+   * itself reported in the file (OFX/QFX `<LEDGERBAL>`). Null when the
+   * format carries no balance — every CSV provider. See
+   * reconcileAgainstStatement in src/routes/imports.ts.
+   */
+  reconciliation: ImportReconciliation | null;
 }
 
 /**

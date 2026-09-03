@@ -1,11 +1,11 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNull, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireBudgetMember } from '../auth/middleware';
 import { ensurePaymentCategory, renamePaymentCategory } from '../budget/payment-categories';
 import { insertTransaction } from '../budget/transactions';
 import { getDb } from '../db/client';
-import { accounts, budgets } from '../db/schema';
+import { accounts, budgets, transactions } from '../db/schema';
 import { CREDIT_ACCOUNT_KINDS, type AccountKind } from '../domain/types';
 import { convertToBudgetMinor, parseAmountToMinor, parseFxRateToMicros } from '../lib/money';
 import { ulid } from '../lib/ids';
@@ -61,9 +61,28 @@ accountsRoute.use('*', requireBudgetMember('viewer'));
 accountsRoute.get('/', async (c) => {
   const db = getDb(c.env);
   const rows = await db
-    .select()
+    .select({
+      ...getTableColumns(accounts),
+      /**
+       * The newest transaction date on this account, or null when it has
+       * none — so the sidebar can show at a glance how current each
+       * account is, which is what makes a missed import visible.
+       *
+       * Aggregated here rather than fetched per account by the UI: this is
+       * one query with a join instead of N round trips, and the sidebar
+       * renders every account at once.
+       *
+       * Unapproved rows count. They are real transactions sitting in the
+       * register — an import that landed but has not been reviewed still
+       * means the account is up to date, and excluding them would report
+       * an account as stale precisely when it just got fresh data.
+       */
+      lastTransactionDate: sql<string | null>`MAX(${transactions.date})`,
+    })
     .from(accounts)
+    .leftJoin(transactions, and(eq(transactions.accountId, accounts.id), isNull(transactions.deletedAt)))
     .where(and(eq(accounts.budgetId, budgetIdParam(c)), isNull(accounts.deletedAt)))
+    .groupBy(accounts.id)
     .orderBy(accounts.sortOrder);
   return c.json({ accounts: rows });
 });

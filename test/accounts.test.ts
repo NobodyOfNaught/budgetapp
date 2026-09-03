@@ -497,3 +497,92 @@ describe('unauthenticated access', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('GET /api/v1/budgets/:budgetId/accounts — lastTransactionDate', () => {
+  interface AccountRow {
+    id: string;
+    name: string;
+    lastTransactionDate: string | null;
+  }
+
+  async function listAccounts(app: Parameters<typeof callJson>[0], cookie: string, budgetId: string) {
+    const { body } = await callJson<{ accounts: AccountRow[] }>(app, cookie, `/api/v1/budgets/${budgetId}/accounts`);
+    return body.accounts;
+  }
+
+  async function makeAccount(app: Parameters<typeof callJson>[0], cookie: string, budgetId: string, name: string) {
+    const { body } = await callJson<{ account: { id: string } }>(app, cookie, `/api/v1/budgets/${budgetId}/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ name, type: 'checking' }),
+    });
+    return body.account.id;
+  }
+
+  async function addTransaction(
+    app: Parameters<typeof callJson>[0],
+    cookie: string,
+    budgetId: string,
+    accountId: string,
+    date: string,
+    amount: string,
+  ) {
+    return callJson<{ transactionId: string }>(app, cookie, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date, amount, payeeName: 'Shop' }),
+    });
+  }
+
+  it('reports the newest transaction date, not the most recently entered', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('acct-last-date@example.com');
+    const id = await makeAccount(app, sessionCookie, budgetId, 'Chequing');
+
+    // Entered newest-first, so a naive "last row inserted" would answer
+    // 2026-03-01 rather than the actual newest date.
+    await addTransaction(app, sessionCookie, budgetId, id, '2026-08-21', '-10.00');
+    await addTransaction(app, sessionCookie, budgetId, id, '2026-03-01', '-20.00');
+
+    const account = (await listAccounts(app, sessionCookie, budgetId)).find((a) => a.id === id);
+    expect(account?.lastTransactionDate).toBe('2026-08-21');
+  });
+
+  it('is null for an account with no transactions, rather than omitting the account', async () => {
+    // The LEFT JOIN matters: an inner join would drop empty accounts out of
+    // the sidebar entirely, which is a far worse bug than a missing date.
+    const { app, sessionCookie, budgetId } = await signInNewUser('acct-empty-date@example.com');
+    const id = await makeAccount(app, sessionCookie, budgetId, 'Untouched');
+
+    const accounts = await listAccounts(app, sessionCookie, budgetId);
+    const account = accounts.find((a) => a.id === id);
+    expect(account).toBeDefined();
+    expect(account?.lastTransactionDate).toBeNull();
+  });
+
+  it('keeps each account on its own date rather than the budget-wide maximum', async () => {
+    // The GROUP BY: without it every account would report the newest date
+    // anywhere in the budget, which looks plausible and is always wrong.
+    const { app, sessionCookie, budgetId } = await signInNewUser('acct-per-account@example.com');
+    const stale = await makeAccount(app, sessionCookie, budgetId, 'Stale');
+    const fresh = await makeAccount(app, sessionCookie, budgetId, 'Fresh');
+
+    await addTransaction(app, sessionCookie, budgetId, stale, '2026-01-15', '-5.00');
+    await addTransaction(app, sessionCookie, budgetId, fresh, '2026-09-02', '-5.00');
+
+    const accounts = await listAccounts(app, sessionCookie, budgetId);
+    expect(accounts.find((a) => a.id === stale)?.lastTransactionDate).toBe('2026-01-15');
+    expect(accounts.find((a) => a.id === fresh)?.lastTransactionDate).toBe('2026-09-02');
+  });
+
+  it('ignores deleted transactions', async () => {
+    const { app, sessionCookie, budgetId } = await signInNewUser('acct-deleted-date@example.com');
+    const id = await makeAccount(app, sessionCookie, budgetId, 'Chequing');
+
+    await addTransaction(app, sessionCookie, budgetId, id, '2026-05-01', '-10.00');
+    const newest = await addTransaction(app, sessionCookie, budgetId, id, '2026-08-21', '-10.00');
+    await callJson(app, sessionCookie, `/api/v1/budgets/${budgetId}/transactions/${newest.body.transactionId}`, {
+      method: 'DELETE',
+    });
+
+    const account = (await listAccounts(app, sessionCookie, budgetId)).find((a) => a.id === id);
+    expect(account?.lastTransactionDate).toBe('2026-05-01');
+  });
+});

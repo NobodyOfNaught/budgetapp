@@ -20,6 +20,52 @@ type View =
   | { kind: 'reports' }
   | { kind: 'rules' };
 
+/**
+ * Formats a 'YYYY-MM-DD' as a short local date. Parsed as UTC noon rather
+ * than midnight: `new Date('2026-08-21')` is UTC midnight, which in any
+ * western timezone renders as the 20th. Noon is far enough from either
+ * boundary that no real offset can shift the day.
+ */
+function formatShortDate(isoDate: string): string {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day!, 12)).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/**
+ * One account in the sidebar, with the date of its newest transaction
+ * underneath — the thing that makes a stale account (an import you meant to
+ * run and didn't) visible without opening it.
+ *
+ * Shared by the on-budget and tracking lists rather than written twice.
+ * The two were identical before this, which is exactly how a change lands
+ * in one list and not the other — the same trap web/src/providers.ts
+ * documents for provider dropdowns.
+ */
+function AccountListItem({
+  account,
+  selected,
+  onSelect,
+}: {
+  account: Account;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <li style={{ marginBottom: '0.15rem' }}>
+      <button onClick={onSelect} style={{ fontWeight: selected ? 'bold' : 'normal' }}>
+        {account.name}
+      </button>
+      <div style={{ fontSize: '0.75rem', color: '#666', marginLeft: '0.15rem' }}>
+        {account.lastTransactionDate ? formatShortDate(account.lastTransactionDate) : 'no transactions'}
+      </div>
+    </li>
+  );
+}
+
 export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; budgetCurrencyCode: string }) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[] | null>(null);
@@ -105,14 +151,12 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
         <h3>Accounts</h3>
         <ul style={{ listStyle: 'none', padding: 0 }}>
           {onBudgetAccounts.map((a) => (
-            <li key={a.id}>
-              <button
-                onClick={() => setView({ kind: 'account', accountId: a.id })}
-                style={{ fontWeight: view.kind === 'account' && view.accountId === a.id ? 'bold' : 'normal' }}
-              >
-                {a.name}
-              </button>
-            </li>
+            <AccountListItem
+              key={a.id}
+              account={a}
+              selected={view.kind === 'account' && view.accountId === a.id}
+              onSelect={() => setView({ kind: 'account', accountId: a.id })}
+            />
           ))}
         </ul>
         {trackingAccounts.length > 0 && (
@@ -120,14 +164,12 @@ export function Budget({ budgetId, budgetCurrencyCode }: { budgetId: string; bud
             <h3>Tracking</h3>
             <ul style={{ listStyle: 'none', padding: 0 }}>
               {trackingAccounts.map((a) => (
-                <li key={a.id}>
-                  <button
-                    onClick={() => setView({ kind: 'account', accountId: a.id })}
-                    style={{ fontWeight: view.kind === 'account' && view.accountId === a.id ? 'bold' : 'normal' }}
-                  >
-                    {a.name}
-                  </button>
-                </li>
+                <AccountListItem
+                  key={a.id}
+                  account={a}
+                  selected={view.kind === 'account' && view.accountId === a.id}
+                  onSelect={() => setView({ kind: 'account', accountId: a.id })}
+                />
               ))}
             </ul>
           </>

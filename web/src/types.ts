@@ -59,6 +59,8 @@ export interface Account {
   importOptions: string | null;
   /** Budget-currency-per-1-unit-of-account-currency, x1,000,000 — null means no rate on file. See AccountForm.tsx/ImportForm.tsx. */
   fxRateMicros: number | null;
+  /** 'YYYY-MM-DD' of the newest transaction on this account, or null when it has none. Unapproved rows count — see the accounts route. */
+  lastTransactionDate: string | null;
 }
 
 export type CategoryKind = 'spending' | 'credit_card_payment' | 'income';

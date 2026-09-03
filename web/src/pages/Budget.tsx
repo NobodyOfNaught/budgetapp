@@ -21,24 +21,16 @@ type View =
   | { kind: 'rules' };
 
 /**
- * Formats a 'YYYY-MM-DD' as a short local date. Parsed as UTC noon rather
- * than midnight: `new Date('2026-08-21')` is UTC midnight, which in any
- * western timezone renders as the 20th. Noon is far enough from either
- * boundary that no real offset can shift the day.
- */
-function formatShortDate(isoDate: string): string {
-  const [year, month, day] = isoDate.split('-').map(Number);
-  return new Date(Date.UTC(year!, month! - 1, day!, 12)).toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
-}
-
-/**
  * One account in the sidebar, with the date of its newest transaction
- * underneath — the thing that makes a stale account (an import you meant to
+ * beside it — the thing that makes a stale account (an import you meant to
  * run and didn't) visible without opening it.
+ *
+ * The date is rendered as the stored 'YYYY-MM-DD' verbatim, deliberately
+ * NOT run through toLocaleDateString. These are calendar dates, not
+ * instants: converting one to a local date means parsing it as UTC
+ * midnight, which renders as the previous day in every western timezone.
+ * Printing the stored string is both correct and sortable by eye down the
+ * column.
  *
  * Shared by the on-budget and tracking lists rather than written twice.
  * The two were identical before this, which is exactly how a change lands
@@ -55,13 +47,13 @@ function AccountListItem({
   onSelect: () => void;
 }) {
   return (
-    <li style={{ marginBottom: '0.15rem' }}>
+    <li style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.15rem' }}>
       <button onClick={onSelect} style={{ fontWeight: selected ? 'bold' : 'normal' }}>
         {account.name}
       </button>
-      <div style={{ fontSize: '0.75rem', color: '#666', marginLeft: '0.15rem' }}>
-        {account.lastTransactionDate ? formatShortDate(account.lastTransactionDate) : 'no transactions'}
-      </div>
+      <span style={{ fontSize: '0.75rem', color: '#666', whiteSpace: 'nowrap' }}>
+        {account.lastTransactionDate ?? 'none'}
+      </span>
     </li>
   );
 }

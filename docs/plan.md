@@ -1197,6 +1197,54 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 30 — A per-account import start date, so a provider switch costs nothing
+
+Switching an account from one export format to another has been the most expensive routine
+operation in this app. Simplii cost a double-import and a manual cleanup; AACU has been
+sitting unswitched because the same cleanup was queued in front of it; Vancity Visa raised
+it again. The cost is always identical, and it is not really about parsing.
+
+**A provider switch changes the key.** Vancity Visa's CSV keys a row on
+`ref|24871156185253267486429`. The identical row in the QFX keys on
+`fitid|20260704000000D581524871156185253267486429` — the FITID is that same reference with
+the posting date, the D/C flag and the SIC code prepended (confirmed on all 17
+reference-keyed rows in the live account). The two ids describe one transaction and share no
+prefix, so the `(account_id, import_id)` unique index cannot see them as the same thing.
+Re-importing any overlapping window therefore duplicates it. The only remedies were to
+delete the account's history and reimport the lot, or to move
+`budgets.import_cutoff_date` — which silently changes the floor for every *other* account
+too.
+
+So `accounts.import_start_date` (migration 0011): "for THIS account, everything before this
+date is already imported, whoever imported it." The effective floor for an import is the
+**later** of the budget cutoff and the account's start date.
+
+Later-of, rather than one replacing the other, in both directions for a reason. An account
+floor must never reach back past the budget's start and drag in rows from before the budget
+existed; and the budget's cutoff must not pull an account's floor down to where its old rows
+would double up. Both mean "do not import before me", so honouring both means taking the
+stricter — which for two `'YYYY-MM-DD'` strings is simply the larger.
+
+The skip reason names which floor did the holding back (`before the 2026-08-01 start date
+for Vancity Visa` rather than a bare `cutoff`), because with two floors in play "the cutoff"
+alone doesn't tell you which one to go and change.
+
+The filter still runs before any row is resolved to an account, so it is the **primary**
+account's floor — the account the user picked — that applies. For a file that fans out
+across several accounts (Wise's currency sub-accounts) that is the right anchor anyway,
+since those sub-accounts are created by and belong to the same import.
+
+**The UI does the date arithmetic.** Typing the correct boundary is the actual difficulty,
+and it is off-by-one-prone: it is the day *after* the account's newest transaction. The
+account settings screen offers exactly that as a one-click button, using the
+`lastTransactionDate` the sidebar already loads (PR 28). Switching an account's format is now:
+change the provider, click the suggested start date, import.
+
+One case this deliberately does not solve: rows that post *late*, dated before the floor but
+arriving after it was set, are skipped for good. That is the same trade the budget cutoff
+already makes, and the skip list reports every one of them by name — a guard that quietly
+discards data is its own kind of bug.
+
 ### PR 29 — An import now says whether the account balances
 
 Every import so far reported only what it did — imported N, skipped M — and nothing about

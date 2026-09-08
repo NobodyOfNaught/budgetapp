@@ -61,6 +61,8 @@ export interface Account {
   fxRateMicros: number | null;
   /** 'YYYY-MM-DD' of the newest transaction on this account, or null when it has none. Unapproved rows count — see the accounts route. */
   lastTransactionDate: string | null;
+  /** 'YYYY-MM-DD' before which this account imports nothing, or null. Applied on top of the budget's cutoff — the later of the two wins. See AccountSettings.tsx. */
+  importStartDate: string | null;
 }
 
 export type CategoryKind = 'spending' | 'credit_card_payment' | 'income';

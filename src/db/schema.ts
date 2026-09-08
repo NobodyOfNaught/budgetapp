@@ -155,6 +155,13 @@ export const accounts = sqliteTable(
     // successful import, read back to pre-fill the next one. NULL for
     // providers with no such choice (Wise, BECU).
     importOptions: text('import_options'),
+    // 'YYYY-MM-DD', or NULL for none. A floor on which rows this ACCOUNT
+    // imports, applied on top of budgets.import_cutoff_date rather than
+    // instead of it — the effective floor is the later of the two. Set
+    // when an account changes provider mid-history, so the new format's
+    // differently-keyed rows can't duplicate the old format's. See
+    // migrations/0011 for the full reasoning.
+    importStartDate: text('import_start_date'),
     // Budget-currency-per-1-unit-of-account-currency, x1,000,000 (0.73
     // USD/CAD -> 730000). Lets a foreign-currency account be on-budget: see
     // src/routes/accounts.ts's onBudget logic and src/lib/money.ts's

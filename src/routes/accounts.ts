@@ -50,6 +50,14 @@ const updateAccountSchema = z.object({
   importProvider: z.string().trim().min(1).max(40).nullable().optional(),
   /** Moves the account between Budget and Tracking. A foreign-currency account still needs a rate to be on-budget — see the guardrail below. */
   onBudget: z.boolean().optional(),
+  /**
+   * Sets or clears (null) the date before which this account imports
+   * nothing, on top of the budget-wide cutoff. Its whole purpose is the
+   * provider switch: point it at the day after the last row the OLD
+   * format imported, and the new format's differently-keyed rows for that
+   * same history can no longer double up. See migrations/0011.
+   */
+  importStartDate: dateSchema.nullable().optional(),
 });
 
 export const accountsRoute = new Hono<AppEnv>();
@@ -247,6 +255,7 @@ accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
       closedAt: input.closed === undefined ? existing.closedAt : input.closed ? now : null,
       fxRateMicros,
       importProvider: input.importProvider === undefined ? existing.importProvider : input.importProvider,
+      importStartDate: input.importStartDate === undefined ? existing.importStartDate : input.importStartDate,
       onBudget,
       updatedAt: now,
     })

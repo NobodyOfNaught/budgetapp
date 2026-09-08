@@ -37,6 +37,13 @@ function formatFxRate(micros: number): string {
  * account gives its balance a real value without silently dragging it into
  * category budgeting.
  */
+/** The next calendar day, in 'YYYY-MM-DD'. Parsed as UTC so a local timezone can't shift the date by one. */
+function dayAfter(isoDate: string): string {
+  const next = new Date(`${isoDate}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().slice(0, 10);
+}
+
 export function AccountSettings({
   budgetId,
   account,
@@ -53,6 +60,7 @@ export function AccountSettings({
   const [name, setName] = useState(account.name);
   const [fxRate, setFxRate] = useState(account.fxRateMicros != null ? formatFxRate(account.fxRateMicros) : '');
   const [importProvider, setImportProvider] = useState(account.importProvider ?? '');
+  const [importStartDate, setImportStartDate] = useState(account.importStartDate ?? '');
   const [onBudget, setOnBudget] = useState(account.onBudget);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +79,8 @@ export function AccountSettings({
           onBudget,
           // Empty means "no parser" — null, not omitted, so it can be cleared.
           importProvider: importProvider || null,
+          // Same shape: empty clears the floor rather than leaving it alone.
+          importStartDate: importStartDate || null,
           // An emptied field means "forget the rate" — null, not omitted,
           // since omitting leaves the stored one untouched.
           ...(isForeign ? { fxRate: fxRate.trim() || null } : {}),
@@ -117,6 +127,35 @@ export function AccountSettings({
             ))}
           </select>
         </label>
+      </div>
+      <div style={{ marginTop: '0.5rem' }}>
+        <label>
+          Import nothing dated before{' '}
+          <input type="date" value={importStartDate} onChange={(e) => setImportStartDate(e.target.value)} />
+        </label>{' '}
+        {importStartDate && (
+          <button type="button" onClick={() => setImportStartDate('')}>
+            Clear
+          </button>
+        )}
+        {/*
+          The one-click value, because typing the right date is the whole
+          difficulty. Switching a bank's export format changes the id every
+          row is keyed on, so re-importing history the old format already
+          brought in duplicates it instead of deduping. The day AFTER this
+          account's newest transaction is exactly the boundary that avoids
+          that, and it is a date the sidebar already knows.
+        */}
+        {account.lastTransactionDate && dayAfter(account.lastTransactionDate) !== importStartDate && (
+          <button type="button" onClick={() => setImportStartDate(dayAfter(account.lastTransactionDate as string))}>
+            Start after the newest transaction ({dayAfter(account.lastTransactionDate)})
+          </button>
+        )}
+        <p style={{ color: '#666', fontSize: '0.9em', margin: '0.25rem 0 0' }}>
+          {importStartDate
+            ? `Rows dated before ${importStartDate} are skipped for this account, on top of the budget-wide cutoff — whichever is later wins. Set this when the account changes file format, so history the old format already imported can't come back in under new ids.`
+            : 'Only the budget-wide cutoff applies. Set a date here when this account switches file format, so its already-imported history is not imported a second time under the new format’s ids.'}
+        </p>
       </div>
       {isForeign && (
         <div style={{ marginTop: '0.5rem' }}>

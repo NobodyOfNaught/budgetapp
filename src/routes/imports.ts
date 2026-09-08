@@ -652,6 +652,7 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
       importProvider: accounts.importProvider,
       onBudget: accounts.onBudget,
       fxRateMicros: accounts.fxRateMicros,
+      importStartDate: accounts.importStartDate,
     })
     .from(accounts)
     .where(and(eq(accounts.id, input.accountId), eq(accounts.budgetId, budgetId), isNull(accounts.deletedAt)))
@@ -695,7 +696,36 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   // one. Explicit null means "clear it", which is distinct from omitting
   // the field — hence the `!== undefined` test rather than a truthiness
   // check. Same shape as the fxRate handling above.
-  const effectiveCutoffDate = input.cutoffDate !== undefined ? input.cutoffDate : budget.importCutoffDate;
+  const budgetCutoffDate = input.cutoffDate !== undefined ? input.cutoffDate : budget.importCutoffDate;
+
+  // Two independent floors, and the effective one is the LATER of them.
+  //
+  // The budget's cutoff says "this budget did not exist before this date"
+  // and applies to every account. The account's start date says "for THIS
+  // account, everything before this date is already imported" — the
+  // provider-switch case, where the same transaction carries a different
+  // import id under the new format and would therefore duplicate rather
+  // than dedupe (see migrations/0011).
+  //
+  // Later-of rather than either-replaces-the-other: an account floor must
+  // never be able to reach BACK past the budget's start and drag in rows
+  // from before the budget existed, and the budget's cutoff must not pull
+  // an account's floor down to where its old rows would double up. Both
+  // are "do not import before me", so honouring both means taking the
+  // stricter, which for two 'YYYY-MM-DD' strings is the larger.
+  //
+  // The account here is the PRIMARY one — the account the user picked. A
+  // file that resolves rows into several accounts (Wise's currency
+  // sub-accounts) is filtered by that primary account's floor, because the
+  // filter runs before any row is resolved to an account, and because the
+  // sub-accounts are created by and belong to the same import anyway.
+  const accountStartDate = primaryAccount.importStartDate;
+  const effectiveCutoffDate =
+    budgetCutoffDate && accountStartDate
+      ? budgetCutoffDate > accountStartDate
+        ? budgetCutoffDate
+        : accountStartDate
+      : (budgetCutoffDate ?? accountStartDate);
 
   // Drop everything dated before the cutoff, BEFORE any account is
   // resolved or any row written — a bank export routinely carries far
@@ -724,7 +754,9 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
       beforeCutoff++;
       parseResult.skipped.push({
         reference: row.kind === 'ordinary' ? (row.payeeRaw ?? row.payeeName ?? row.importId) : row.importId,
-        reason: `dated ${row.date}, before the ${cutoff} cutoff`,
+        reason: `dated ${row.date}, before the ${cutoff} ${
+          accountStartDate === cutoff && cutoff !== budgetCutoffDate ? `start date for ${primaryAccount.name}` : 'cutoff'
+        }`,
       });
     }
     parseResult.rows = kept;

@@ -1111,6 +1111,122 @@ describe('the import cutoff date', () => {
     expect(body.beforeCutoff).toBe(2);
   });
 
+  // ------------------------------------------------------------------
+  // The per-account floor (migrations/0011). GIANT_FOOD is 2026-07-27,
+  // SPLIT_* 2026-08-03.
+
+  async function setStartDate(app: App, cookie: string, budgetId: string, accountId: string, date: string | null) {
+    await callJson(app, cookie, `/api/v1/budgets/${budgetId}/accounts/${accountId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ importStartDate: date }),
+    });
+  }
+
+  it("skips rows before the ACCOUNT's start date even with no budget cutoff at all", async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-basic@example.com');
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-08-01');
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD));
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(1);
+    expect(body.cutoffDate).toBe('2026-08-01');
+    // The reason names the account, because with two floors in play "the
+    // cutoff" alone doesn't tell you which one to go and change.
+    expect(body.skipped).toContainEqual({
+      reference: 'Giant Food',
+      reason: 'dated 2026-07-27, before the 2026-08-01 start date for Wise',
+    });
+  });
+
+  it('takes the LATER of the two floors when the account start date is later', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-later@example.com');
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-08-01');
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD), {
+      cutoffDate: '2026-07-01',
+    });
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(1);
+    expect(body.cutoffDate).toBe('2026-08-01');
+  });
+
+  it("takes the LATER of the two floors when the BUDGET's cutoff is later", async () => {
+    // The direction that actually protects something: an account floor
+    // must not be able to reach back past the budget's own start and drag
+    // in rows from before the budget existed.
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-earlier@example.com');
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-07-01');
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD), {
+      cutoffDate: '2026-08-01',
+    });
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(1);
+    expect(body.cutoffDate).toBe('2026-08-01');
+    // ...and the reason says "cutoff", not the account, since that is the
+    // floor that did the holding back.
+    expect(body.skipped).toContainEqual({
+      reference: 'Giant Food',
+      reason: 'dated 2026-07-27, before the 2026-08-01 cutoff',
+    });
+  });
+
+  it('leaves the budget cutoff alone when only the account floor is set', async () => {
+    // The whole reason this column exists rather than reusing the budget
+    // cutoff field: setting a floor for ONE account must not move the
+    // floor for every other account in the budget.
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-isolated@example.com');
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-08-01');
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD));
+
+    const { body: budget } = await callJson<{ budget: { importCutoffDate: string | null } }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}`,
+    );
+    expect(budget.budget.importCutoffDate).toBeNull();
+
+    // A second account in the same budget is unaffected and imports the
+    // older row that the first account skipped.
+    const other = await createAccount(app, sessionCookie, budgetId, { name: 'Other', type: 'checking' });
+    const { body } = await importCsv(app, sessionCookie, budgetId, other.account.id, csv(GIANT_FOOD));
+    expect(body.imported).toBe(1);
+    expect(body.beforeCutoff).toBe(0);
+  });
+
+  it('survives a provider switch: the same history under new ids is held back, not duplicated', async () => {
+    // The case this exists for, in miniature. Import under one provider,
+    // then re-import an OVERLAPPING window whose rows key differently —
+    // exactly what changing a bank's export format does. Without the
+    // floor the older row lands a second time; with it, it does not.
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-switch@example.com');
+    await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD));
+
+    // Same date and amount, different reference — a different import id,
+    // so dedupe on (account_id, import_id) cannot catch it.
+    const reKeyed = GIANT_FOOD.replace('CARD_TRANSACTION-4113574733', 'CARD_TRANSACTION-9990001');
+    expect(reKeyed).not.toBe(GIANT_FOOD);
+
+    const { body: unguarded } = await importCsv(app, sessionCookie, budgetId, accountId, csv(reKeyed));
+    expect(unguarded.imported).toBe(1); // the duplicate this feature prevents
+
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-07-28');
+    const reKeyedAgain = GIANT_FOOD.replace('CARD_TRANSACTION-4113574733', 'CARD_TRANSACTION-9990002');
+    const { body: guarded } = await importCsv(app, sessionCookie, budgetId, accountId, csv(reKeyedAgain));
+    expect(guarded.imported).toBe(0);
+    expect(guarded.beforeCutoff).toBe(1);
+  });
+
+  it('an explicit null clears the account floor', async () => {
+    const { app, sessionCookie, budgetId, accountId } = await setup('start-cleared@example.com');
+    await setStartDate(app, sessionCookie, budgetId, accountId, '2026-08-01');
+    await setStartDate(app, sessionCookie, budgetId, accountId, null);
+
+    const { body } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD, SPLIT_USD));
+    expect(body.imported).toBe(2);
+    expect(body.beforeCutoff).toBe(0);
+  });
+
   it('rejects a malformed cutoff rather than ignoring it', async () => {
     const { app, sessionCookie, budgetId, accountId } = await setup('cutoff-malformed@example.com');
     const { status } = await importCsv(app, sessionCookie, budgetId, accountId, csv(GIANT_FOOD), {

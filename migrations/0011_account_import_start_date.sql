@@ -1,0 +1,32 @@
+-- Per-account import start date (PR 30) — one additive, nullable column,
+-- safe under the expand/contract rule. Nothing on `main` today reads or
+-- writes it, and NULL — every row until someone sets one — means "no
+-- account-level floor", which is exactly the behaviour that exists now.
+--
+-- This is the second date guard on an import, and it exists because the
+-- first one is the wrong shape for the job it was being asked to do.
+-- budgets.import_cutoff_date (0009) answers "when did this budget start" —
+-- one date, every account, set once. That is right for what it is, and
+-- wrong for the case that keeps coming up: ONE account switching provider
+-- mid-history.
+--
+-- A provider switch changes the import key. Vancity Visa's CSV keys on
+-- `ref|24871156185253267486429`; the same transaction in the QFX keys on
+-- `fitid|20260704000000D581524871156185253267486429` (the FITID is the
+-- reference with the posting date, D/C flag and SIC code prepended — the
+-- two ids describe the same row and share no prefix). So re-importing an
+-- overlapping window under the new provider duplicates every row in it,
+-- and the only remedies until now were to delete the old rows and reimport
+-- the lot, or to move the budget's cutoff — which silently changes the
+-- floor for every OTHER account too.
+--
+-- The account-level date is the missing one: "for THIS account, its
+-- history before <date> is already in, whoever imported it." The effective
+-- floor for an import becomes the LATER of the two, so the budget cutoff
+-- stays a floor nobody can accidentally lower per-account, and this only
+-- ever raises it. See src/routes/imports.ts.
+--
+-- Stored as 'YYYY-MM-DD' TEXT, matching transactions.date and
+-- budgets.import_cutoff_date — a calendar date, not an instant, so it
+-- compares with plain string ordering exactly as every other date here.
+ALTER TABLE accounts ADD COLUMN import_start_date TEXT;

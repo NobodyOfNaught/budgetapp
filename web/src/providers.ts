@@ -9,7 +9,8 @@
  */
 export const IMPORT_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: 'wise', label: 'Wise' },
-  { value: 'becu', label: 'BECU' },
+  { value: 'becu', label: 'BECU (old download)' },
+  { value: 'becu_export', label: 'BECU (current download)' },
   { value: 'splitwise', label: 'Splitwise' },
   { value: 'aacu', label: 'AACU' },
   { value: 'neo', label: 'Neo Mastercard' },

@@ -4,6 +4,7 @@
 import type { ImportOptions, StatementParser } from './types';
 import { parseWiseCsv, suggestedCategoryName as wiseSuggestion } from './wise';
 import { parseBecuCsv, suggestedCategoryName as becuSuggestion } from './becu';
+import { parseBecuExportCsv, suggestedCategoryName as becuExportSuggestion } from './becu-export';
 import { parseSplitwiseCsv, suggestedCategoryName as splitwiseSuggestion } from './splitwise';
 import { parseAacuCsv, suggestedCategoryName as aacuSuggestion } from './aacu';
 import { parseNeoCsv, suggestedCategoryName as neoSuggestion } from './neo';
@@ -20,6 +21,8 @@ import { parseWiseJson, suggestedCategoryName as wiseJsonSuggestion } from './wi
 export const IMPORT_PROVIDERS = [
   'wise',
   'becu',
+  // BECU's current download, a different layout from 'becu' above — see src/import/becu-export.ts.
+  'becu_export',
   'splitwise',
   'aacu',
   'neo',
@@ -36,6 +39,7 @@ export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 const PARSERS: Record<ImportProvider, StatementParser> = {
   wise: parseWiseCsv,
   becu: parseBecuCsv,
+  becu_export: parseBecuExportCsv,
   splitwise: parseSplitwiseCsv,
   aacu: parseAacuCsv,
   neo: parseNeoCsv,
@@ -50,6 +54,7 @@ const PARSERS: Record<ImportProvider, StatementParser> = {
 const CATEGORY_SUGGESTERS: Record<ImportProvider, (providerCategory: string | null) => string | null> = {
   wise: wiseSuggestion,
   becu: becuSuggestion,
+  becu_export: becuExportSuggestion,
   splitwise: splitwiseSuggestion,
   aacu: aacuSuggestion,
   neo: neoSuggestion,

@@ -1197,6 +1197,34 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 33 — BECU's new download format, with none of BECU's categories
+
+BECU replaced its `Date, No., Description, Debit, Credit` download with a spreadsheet-style
+export (`Date, Description, Original Description, Amount, Type, Parent Category, Category,
+Account, Tags, Memo, Pending`), and the old one is no longer available. The two layouts are
+unrelated, so this is a new provider, `becu_export`, rather than one parser guessing; the old
+`becu` parser stays for the history already imported.
+
+**The Category columns are never read.** The owner does not trust BECU's categorisation, so
+`providerCategory` is always null and the suggester always returns null: there is no path by
+which a BECU category reaches a row. A test asserts that no category text appears anywhere in
+the parse output, including "Uncategorized".
+
+**Pending rows are skipped by name.** A pending hold reappears later as the posted charge,
+often with a different amount and description, so importing it would leave a phantom beside
+the real row. Each is reported in `skipped` and the posted version arrives on a later export.
+
+**Sign comes from `Type`**, because `Amount` is always printed unsigned. **Ids are still
+content-built** (no id column exists), with an occurrence counter so the two real $70.80 Zelle
+payments on one day stay distinct. `Original Description` goes in `payeeRaw`, since that is the
+text the owner's existing payee rules were written against; the aggregator's own cleaned
+`Description` is not used. A file mixing several accounts is refused outright rather than
+guessed at.
+
+**A start date is still required when switching.** The masking differs between formats (the
+old file prints a card reference as `160000101207`, this one as `XXXXXX101207`), so the same
+transaction gets a different id and the overlap would import twice. See PR 30.
+
 ### PR 32 — API tokens get full authority over the budget
 
 PR 31 deliberately limited a token to an imports-only allowlist, so a leaked one could at

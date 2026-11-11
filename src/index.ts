@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { sameOriginOnly } from './lib/csrf';
+import { existingUsersOnly, type SignInPolicy } from './auth/sign-in-policy';
 import { CloudflareEmailSender, type EmailSender } from './lib/email';
+import { apiTokensRoute } from './routes/api-tokens';
 import { createAuthRoutes } from './routes/auth';
 import { budgetsRoute } from './routes/budgets';
 import { health } from './routes/health';
@@ -17,13 +19,17 @@ import type { AppEnv } from './types/hono';
  * EMAIL/EMAIL_FROM (env.uat today), and falls back to console-logging
  * everywhere else — see src/lib/email.ts.
  */
-export function createApp(emailSender: EmailSender = new CloudflareEmailSender()): Hono<AppEnv> {
+export function createApp(
+  emailSender: EmailSender = new CloudflareEmailSender(),
+  maySignIn: SignInPolicy = existingUsersOnly,
+): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
   app.use('/api/*', sameOriginOnly);
 
   app.route('/api/v1/health', health);
-  app.route('/api/v1/auth', createAuthRoutes(emailSender));
+  app.route('/api/v1/auth', createAuthRoutes(emailSender, maySignIn));
+  app.route('/api/v1/api-tokens', apiTokensRoute);
   app.route('/api/v1/budgets', budgetsRoute);
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404));

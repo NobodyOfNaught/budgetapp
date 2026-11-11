@@ -9,6 +9,7 @@ import { signInUser } from '../auth/users';
 import { getDb } from '../db/client';
 import { budgetMembers, budgets } from '../db/schema';
 import type { EmailSender } from '../lib/email';
+import { existingUsersOnly, type SignInPolicy } from '../auth/sign-in-policy';
 import type { AppEnv } from '../types/hono';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -26,7 +27,7 @@ function clientIp(c: { req: { header(name: string): string | undefined } }): str
  * anywhere (only its hash — see src/auth/tokens.ts), so this is the only
  * way to observe it in a test.
  */
-export function createAuthRoutes(emailSender: EmailSender): Hono<AppEnv> {
+export function createAuthRoutes(emailSender: EmailSender, maySignIn: SignInPolicy = existingUsersOnly): Hono<AppEnv> {
   const auth = new Hono<AppEnv>();
 
   // Always 200, identical response whether or not the address has an
@@ -42,7 +43,12 @@ export function createAuthRoutes(emailSender: EmailSender): Hono<AppEnv> {
 
     const db = getDb(c.env);
     const ip = clientIp(c);
-    const overLimit = (await isIpOverLimit(c.env, ip)) || (await isEmailOverLimit(db, emailNormalized));
+    // An unknown address is treated exactly like a rate-limited one: no
+    // token, no email, no cookie, and the same 200 — so the endpoint can't
+    // be used to discover the owner's address, or to send mail on this
+    // domain's behalf to anyone else.
+    const allowed = await maySignIn(db, emailNormalized);
+    const overLimit = !allowed || (await isIpOverLimit(c.env, ip)) || (await isEmailOverLimit(db, emailNormalized));
 
     if (!overLimit) {
       const { token, challenge, expiresAt } = await createMagicLinkToken(db, {
@@ -88,6 +94,13 @@ export function createAuthRoutes(emailSender: EmailSender): Hono<AppEnv> {
       return c.json({ status: outcome.status });
     }
 
+    // Checked again at consume, not only at issue: a token minted for a
+    // user who has since been removed must not sign its holder back in
+    // (and recreate them, via signInUser's find-or-create).
+    if (!(await maySignIn(db, outcome.emailNormalized))) {
+      return c.json({ status: 'invalid' });
+    }
+
     const { user, budgetId } = await signInUser(db, outcome.emailNormalized);
     const session = await createSession(db, { userId: user.id, ip: clientIp(c), ua: c.req.header('User-Agent') });
 
@@ -120,7 +133,7 @@ export function createAuthRoutes(emailSender: EmailSender): Hono<AppEnv> {
     const user = c.get('user');
 
     const rows = await db
-      .select({ id: budgets.id, name: budgets.name, currencyCode: budgets.currencyCode, role: budgetMembers.role })
+      .select({ id: budgets.id, name: budgets.name, currencyCode: budgets.currencyCode })
       .from(budgetMembers)
       .innerJoin(budgets, eq(budgets.id, budgetMembers.budgetId))
       .where(eq(budgetMembers.userId, user.id));

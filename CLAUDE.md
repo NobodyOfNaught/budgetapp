@@ -137,3 +137,30 @@ npx wrangler d1 migrations apply budgetapp-db --env stg --remote && npx wrangler
 
 That's a manual dashboard edit only the user can make (same as the rest of Workers Builds
 setup) — flag it rather than assuming it's already done.
+
+## Importing statement files for the owner
+
+This is a single-person site. The owner no longer uploads statements in the
+browser — they hand the files to Claude in a session, and Claude imports them
+through the token-authenticated API (`migrations/0012`, `src/routes/api-tokens.ts`,
+`API_TOKEN_ROUTES` in `src/auth/middleware.ts`).
+
+```sh
+NODE_USE_ENV_PROXY=1 node scripts/import-statement.mjs \
+  --env prod --account "Vancity Visa" --provider ofx path/to/file.qfx
+```
+
+- **The token is never in chat, a file, or a command line.** The owner creates it
+  in the app (home page → *API tokens*), and it is saved as a network credential
+  for the site's host via the `request_credential` tool; the session proxy injects
+  the `Authorization` header. If a call returns 401, ask for the credential with
+  `request_credential` — never ask the owner to paste the token.
+- **A token can only read the budget/accounts and run imports.** It cannot edit or
+  delete anything, and every imported row lands unapproved for the owner's review.
+- **Imports go to `prod` directly** — they are data, not deploys, so the uat-first
+  gate above does not apply. Use `--dry-run` first when unsure which account a file
+  belongs to, and report the balance-check line the script prints; a mismatch is
+  something to tell the owner, not to fix by editing rows.
+- Choose `--provider` from the account's own `importProvider` (the script prints
+  the account it matched). A provider *switch* needs the account's import start
+  date set first (see `docs/plan.md` PR 30), or the overlap imports twice.

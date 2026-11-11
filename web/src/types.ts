@@ -13,7 +13,6 @@ export interface BudgetSummary {
   id: string;
   name: string;
   currencyCode: string;
-  role: 'owner' | 'editor' | 'viewer';
 }
 
 /** GET /budgets/:budgetId — the single budget, with settings the list endpoint doesn't carry. */

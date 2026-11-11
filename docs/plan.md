@@ -1197,6 +1197,58 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 31 — One person's site, and statements imported through Claude
+
+Two changes in direction from the owner: the site is theirs alone, and statement files now
+reach it by being handed to Claude rather than uploaded in the browser.
+
+**The sign-in lock is "existing users only".** Until now anyone who could receive email got
+a magic link and, on first use, a freshly created budget. Now a link is issued only to an
+address that already has a `users` row, and no user is ever created
+(`src/auth/sign-in-policy.ts`). An unknown address gets the identical `200` a rate-limited
+one does — no email, no cookie — so the endpoint reveals nothing and sends no mail to
+strangers. The check repeats at consume, because `signInUser` find-or-creates: a still-valid
+link for a since-removed user would otherwise recreate them.
+
+An `OWNER_EMAIL` allowlist secret was the first design. It was dropped for this one because
+it needs no configuration at all: nothing to forget in one environment, nothing to differ
+between stg and main, and it fails closed by construction — an empty database admits
+nobody. The tests' open policy is a `createApp()` argument rather than a setting, so
+reopening sign-ups is not one mistyped config value away.
+
+**The role ladder is gone.** `viewer < editor < owner` existed for budget sharing that was
+never built; with one person, every member is the owner and the ladder only ever said yes.
+42 per-route role arguments collapse to one `.use('*', requireBudgetMember)` per sub-app.
+What remains is not a formality — it is the check that the budget id in the URL is the
+caller's — and nothing had pinned it before. An intermediate draft of this change removed
+it from `GET /budgets/:budgetId` (the one route whose only guard was inline); a new test
+asserts the 403 on another user's budget, and was confirmed to fail with the guard removed.
+`budget_members` stays, `role` still written as `'owner'`: dropping it would be a breaking
+migration for no gain.
+
+**API tokens (migration 0012).** A token is deliberately narrower than a session. It is
+admitted only to an allowlist — list budgets, read one budget, list its accounts, run an
+import, inspect a Splitwise file — so a leaked token can at worst add rows that land
+unapproved and are undoable as a batch. It cannot edit or delete, browse transactions, mint
+or list tokens (those routes are session-only), or reach `/auth`. A request that presents a
+bearer header is judged on the token alone: a bad token is a 401 even with a valid cookie
+attached, so a client that believes it is using a token finds out when it isn't. Only the
+SHA-256 is stored and the raw value is shown once. CSRF is unchanged; the client sends a
+matching `Origin`.
+
+Tokens live in a table, not a Worker secret, because they are created and revoked from the
+app by the signed-in owner — no deploy, no Cloudflare access. On the Claude side the token
+is saved as a session network credential for the host and injected by the proxy, so it never
+appears in a chat, a file, or a command line; `scripts/import-statement.mjs` holds no token
+and prints each import's balance check.
+
+**UAT's data was copied to prod** ahead of this change, as a separate step: the owner's one
+budget, 1,224 transactions, verified on arrival by an identical amount fingerprint
+(−1,630,481) and a clean foreign-key check, with a Time Travel bookmark taken first. Not
+copied: a second, empty account on UAT belonging to someone else; sessions and magic-link
+tokens; and the stored Wise connection, whose ciphertext is bound to UAT's
+`CREDENTIALS_KEY`.
+
 ### PR 30 — A per-account import start date, so a provider switch costs nothing
 
 Switching an account from one export format to another has been the most expensive routine

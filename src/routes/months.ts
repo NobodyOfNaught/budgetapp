@@ -151,7 +151,7 @@ const assignmentsSchema = z.object({
 });
 
 export const monthsRoute = new Hono<AppEnv>();
-monthsRoute.use('*', requireBudgetMember('viewer'));
+monthsRoute.use('*', requireBudgetMember);
 
 monthsRoute.get('/:month', async (c) => {
   const budgetId = budgetIdParam(c);
@@ -163,7 +163,7 @@ monthsRoute.get('/:month', async (c) => {
   return c.json(view);
 });
 
-monthsRoute.put('/:month/assignments', requireBudgetMember('editor'), async (c) => {
+monthsRoute.put('/:month/assignments', async (c) => {
   const budgetId = budgetIdParam(c);
   const monthParam = c.req.param('month');
   if (!MONTH_RE.test(monthParam)) return c.json({ error: 'invalid_month' }, 400);

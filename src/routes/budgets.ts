@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { requireAuth, requireBudgetMember } from '../auth/middleware';
+import { requireAuthOrApiToken, requireBudgetMember } from '../auth/middleware';
 import { getDb } from '../db/client';
 import { budgetMembers, budgets } from '../db/schema';
 import type { AppEnv } from '../types/hono';
@@ -17,12 +17,12 @@ import { payeeRulesRoute } from './payee-rules';
 
 export const budgetsRoute = new Hono<AppEnv>();
 
-budgetsRoute.use('*', requireAuth);
+budgetsRoute.use('*', requireAuthOrApiToken);
 
 budgetsRoute.get('/', async (c) => {
   const db = getDb(c.env);
   const rows = await db
-    .select({ id: budgets.id, name: budgets.name, currencyCode: budgets.currencyCode, role: budgetMembers.role })
+    .select({ id: budgets.id, name: budgets.name, currencyCode: budgets.currencyCode })
     .from(budgetMembers)
     .innerJoin(budgets, eq(budgets.id, budgetMembers.budgetId))
     .where(eq(budgetMembers.userId, c.get('user').id));
@@ -34,7 +34,7 @@ budgetsRoute.get('/', async (c) => {
 // src/auth/middleware.ts. Everything budget-scoped in later PRs (accounts,
 // categories, transactions) mounts under /budgets/:budgetId/... and reuses
 // this exact middleware, not a bespoke ownership check per route.
-budgetsRoute.get('/:budgetId', requireBudgetMember('viewer'), async (c) => {
+budgetsRoute.get('/:budgetId', requireBudgetMember, async (c) => {
   const db = getDb(c.env);
   const budgetId = c.req.param('budgetId');
 
@@ -53,7 +53,7 @@ budgetsRoute.get('/:budgetId', requireBudgetMember('viewer'), async (c) => {
 
   if (!budget) return c.json({ error: 'not_found' }, 404);
 
-  return c.json({ budget, role: c.get('budgetRole') });
+  return c.json({ budget });
 });
 
 budgetsRoute.route('/:budgetId/accounts', accountsRoute);

@@ -53,7 +53,7 @@ function parseDailyRange(c: Context<AppEnv>): { start: string; end: string } | n
 }
 
 export const reportsRoute = new Hono<AppEnv>();
-reportsRoute.use('*', requireBudgetMember('viewer'));
+reportsRoute.use('*', requireBudgetMember);
 
 // Spending by category over [start, end] — built entirely on top of
 // computeLedger's own per-month activity (src/domain/ledger.ts), not a

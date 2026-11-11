@@ -62,9 +62,8 @@ const updateAccountSchema = z.object({
 
 export const accountsRoute = new Hono<AppEnv>();
 
-// Every route here needs at least a member; POST/PATCH additionally
-// require 'editor' below — see requireBudgetMember's stacking note.
-accountsRoute.use('*', requireBudgetMember('viewer'));
+// Every route here requires the budget to be the caller's own.
+accountsRoute.use('*', requireBudgetMember);
 
 accountsRoute.get('/', async (c) => {
   const db = getDb(c.env);
@@ -95,7 +94,7 @@ accountsRoute.get('/', async (c) => {
   return c.json({ accounts: rows });
 });
 
-accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
+accountsRoute.post('/', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = createAccountSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -189,7 +188,7 @@ accountsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   );
 });
 
-accountsRoute.patch('/:accountId', requireBudgetMember('editor'), async (c) => {
+accountsRoute.patch('/:accountId', async (c) => {
   const budgetId = budgetIdParam(c);
   const accountId = c.req.param('accountId');
   const parsed = updateAccountSchema.safeParse(await c.req.json().catch(() => null));

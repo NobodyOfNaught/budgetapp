@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, ApiError } from '../api';
+import { ApiTokens } from '../components/ApiTokens';
 import type { MeResponse } from '../types';
 import { Budget } from './Budget';
 import { SignInForm } from './SignInForm';
@@ -50,9 +51,9 @@ export function Home() {
       {primaryBudget ? (
         <>
           <p>
-            Budget: <strong>{primaryBudget.name}</strong> ({primaryBudget.currencyCode}) — role:{' '}
-            {primaryBudget.role}
+            Budget: <strong>{primaryBudget.name}</strong> ({primaryBudget.currencyCode})
           </p>
+          <ApiTokens />
           <Budget budgetId={primaryBudget.id} budgetCurrencyCode={primaryBudget.currencyCode} />
         </>
       ) : (

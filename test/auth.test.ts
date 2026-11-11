@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index';
+import { anyoneMaySignIn } from '../src/auth/sign-in-policy';
 import { call, CapturingEmailSender, cookieValue, req, resetDb, signInNewUser } from './helpers';
 
 // Each test gets a clean slate — auth_tokens/users/etc. would otherwise
@@ -10,7 +11,7 @@ beforeEach(resetDb);
 
 async function requestMagicLink(email: string) {
   const emailSender = new CapturingEmailSender();
-  const app = createApp(emailSender);
+  const app = createApp(emailSender, anyoneMaySignIn);
   // See test/helpers.ts's signInNewUser doc comment: the fake client IP is
   // keyed off the email so the shared AUTH_RATE_LIMITER state doesn't leak
   // across tests in this file.
@@ -43,7 +44,7 @@ describe('POST /api/v1/auth/magic-link', () => {
   });
 
   it('rejects a cross-origin request (no matching Origin header)', async () => {
-    const app = createApp(new CapturingEmailSender());
+    const app = createApp(new CapturingEmailSender(), anyoneMaySignIn);
     const request = new Request(`http://example.com/api/v1/auth/magic-link`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
@@ -122,7 +123,7 @@ describe('POST /api/v1/auth/consume', () => {
   });
 
   it('rejects an unknown token as invalid', async () => {
-    const app = createApp(new CapturingEmailSender());
+    const app = createApp(new CapturingEmailSender(), anyoneMaySignIn);
     const res = await call(
       app,
       req('/api/v1/auth/consume', { method: 'POST', body: JSON.stringify({ token: 'not-a-real-token' }) }),
@@ -156,7 +157,7 @@ describe('POST /api/v1/auth/consume', () => {
 
 describe('session-gated routes', () => {
   it('GET /me is 401 without a session cookie', async () => {
-    const app = createApp(new CapturingEmailSender());
+    const app = createApp(new CapturingEmailSender(), anyoneMaySignIn);
     const res = await call(app, req('/api/v1/auth/me'));
     expect(res.status).toBe(401);
   });
@@ -164,10 +165,13 @@ describe('session-gated routes', () => {
   it('GET /me returns the user and their auto-created budget when signed in', async () => {
     const { app, sessionCookie } = await signInNewUser('me-route@example.com');
     const res = await call(app, req('/api/v1/auth/me', { cookie: `__Host-session=${sessionCookie}` }));
-    const body = await res.json<{ user: { email: string }; budgets: { role: string }[] }>();
+    const body = await res.json<{ user: { email: string }; budgets: { id: string; role?: string }[] }>();
     expect(body.user.email).toBe('me-route@example.com');
     expect(body.budgets).toHaveLength(1);
-    expect(body.budgets[0]?.role).toBe('owner');
+    // This used to assert role === 'owner'. The role ladder was removed when
+    // the site became single-user (src/auth/middleware.ts): every member is
+    // the owner, so the field said nothing and is no longer sent.
+    expect(body.budgets[0]?.role).toBeUndefined();
   });
 
   it('GET /budgets/:id is 403 for a budget the user does not belong to', async () => {
@@ -182,8 +186,10 @@ describe('session-gated routes', () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('own-budget@example.com');
     const res = await call(app, req(`/api/v1/budgets/${budgetId}`, { cookie: `__Host-session=${sessionCookie}` }));
     expect(res.status).toBe(200);
-    const body = await res.json<{ role: string }>();
-    expect(body.role).toBe('owner');
+    const body = await res.json<{ budget: { id: string }; role?: string }>();
+    // Was `body.role === 'owner'` — see the /me test above for why role went.
+    expect(body.budget.id).toBe(budgetId);
+    expect(body.role).toBeUndefined();
   });
 
   it('POST /logout revokes the session', async () => {

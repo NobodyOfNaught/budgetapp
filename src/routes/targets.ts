@@ -46,7 +46,7 @@ function toTargetView(row: typeof categoryTargets.$inferSelect) {
 }
 
 export const targetsRoute = new Hono<AppEnv>();
-targetsRoute.use('*', requireBudgetMember('viewer'));
+targetsRoute.use('*', requireBudgetMember);
 
 targetsRoute.get('/', async (c) => {
   const budgetId = budgetIdParam(c);
@@ -58,7 +58,7 @@ targetsRoute.get('/', async (c) => {
   return c.json({ targets: rows.map(toTargetView) });
 });
 
-targetsRoute.put('/:categoryId', requireBudgetMember('editor'), async (c) => {
+targetsRoute.put('/:categoryId', async (c) => {
   const budgetId = budgetIdParam(c);
   const categoryId = c.req.param('categoryId');
   const parsed = upsertTargetSchema.safeParse(await c.req.json().catch(() => null));
@@ -109,7 +109,7 @@ targetsRoute.put('/:categoryId', requireBudgetMember('editor'), async (c) => {
   return c.json({ status: 'ok' });
 });
 
-targetsRoute.delete('/:categoryId', requireBudgetMember('editor'), async (c) => {
+targetsRoute.delete('/:categoryId', async (c) => {
   const budgetId = budgetIdParam(c);
   const categoryId = c.req.param('categoryId');
   const db = getDb(c.env);
@@ -134,7 +134,7 @@ targetsRoute.delete('/:categoryId', requireBudgetMember('editor'), async (c) => 
 // src/domain/targets.ts's doc comment) — it answers "what's due soon from
 // right now", not "how much to assign this month".
 export const upcomingRoute = new Hono<AppEnv>();
-upcomingRoute.use('*', requireBudgetMember('viewer'));
+upcomingRoute.use('*', requireBudgetMember);
 
 const upcomingQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(365).default(60) });
 

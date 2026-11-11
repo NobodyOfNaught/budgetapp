@@ -7,7 +7,7 @@ import { budgetIdParam } from '../lib/params';
 import type { AppEnv } from '../types/hono';
 
 export const payeesRoute = new Hono<AppEnv>();
-payeesRoute.use('*', requireBudgetMember('viewer'));
+payeesRoute.use('*', requireBudgetMember);
 
 // No POST here — payees are created on the fly by the transactions
 // endpoint from whatever name the user types (see src/budget/payees.ts).

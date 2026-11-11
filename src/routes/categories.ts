@@ -28,7 +28,7 @@ const updateCategorySchema = z.object({
 });
 
 export const categoriesRoute = new Hono<AppEnv>();
-categoriesRoute.use('*', requireBudgetMember('viewer'));
+categoriesRoute.use('*', requireBudgetMember);
 
 // Groups with their categories nested — the shape both the register's
 // category picker and (later) the budget screen want.
@@ -59,7 +59,7 @@ categoriesRoute.get('/', async (c) => {
   });
 });
 
-categoriesRoute.post('/groups', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.post('/groups', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = createGroupSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -71,7 +71,7 @@ categoriesRoute.post('/groups', requireBudgetMember('editor'), async (c) => {
   return c.json({ group: { id, name: parsed.data.name } }, 201);
 });
 
-categoriesRoute.patch('/groups/:groupId', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.patch('/groups/:groupId', async (c) => {
   const budgetId = budgetIdParam(c);
   const groupId = c.req.param('groupId');
   const parsed = updateGroupSchema.safeParse(await c.req.json().catch(() => null));
@@ -101,7 +101,7 @@ categoriesRoute.patch('/groups/:groupId', requireBudgetMember('editor'), async (
   return c.json({ status: 'ok' });
 });
 
-categoriesRoute.delete('/groups/:groupId', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.delete('/groups/:groupId', async (c) => {
   const budgetId = budgetIdParam(c);
   const groupId = c.req.param('groupId');
   const db = getDb(c.env);
@@ -125,7 +125,7 @@ categoriesRoute.delete('/groups/:groupId', requireBudgetMember('editor'), async 
   return c.json({ status: 'ok' });
 });
 
-categoriesRoute.post('/', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.post('/', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = createCategorySchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -157,7 +157,7 @@ categoriesRoute.post('/', requireBudgetMember('editor'), async (c) => {
   return c.json({ category: { id, name: input.name, groupId: input.groupId, kind: 'spending' } }, 201);
 });
 
-categoriesRoute.patch('/:categoryId', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.patch('/:categoryId', async (c) => {
   const budgetId = budgetIdParam(c);
   const categoryId = c.req.param('categoryId');
   const parsed = updateCategorySchema.safeParse(await c.req.json().catch(() => null));
@@ -198,7 +198,7 @@ categoriesRoute.patch('/:categoryId', requireBudgetMember('editor'), async (c) =
   return c.json({ status: 'ok' });
 });
 
-categoriesRoute.delete('/:categoryId', requireBudgetMember('editor'), async (c) => {
+categoriesRoute.delete('/:categoryId', async (c) => {
   const budgetId = budgetIdParam(c);
   const categoryId = c.req.param('categoryId');
   const db = getDb(c.env);

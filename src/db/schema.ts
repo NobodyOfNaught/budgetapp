@@ -77,6 +77,24 @@ export const sessions = sqliteTable(
   (t) => [index('sessions_user_idx').on(t.userId)],
 );
 
+// Bearer tokens for the import API — see migrations/0012. Only the SHA-256
+// of a token is stored; the raw value is shown once, at creation.
+export const apiTokens = sqliteTable(
+  'api_tokens',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    label: text('label').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    lastUsedAt: integer('last_used_at'),
+    createdAt: integer('created_at').notNull(),
+    revokedAt: integer('revoked_at'),
+  },
+  (t) => [uniqueIndex('api_tokens_hash_idx').on(t.tokenHash), index('api_tokens_user_idx').on(t.userId)],
+);
+
 export const budgets = sqliteTable('budgets', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),

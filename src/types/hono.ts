@@ -7,6 +7,5 @@ export type AppEnv = {
   Variables: {
     user: User;
     session: Session;
-    budgetRole?: 'owner' | 'editor' | 'viewer';
   };
 };

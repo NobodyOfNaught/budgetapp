@@ -104,9 +104,9 @@ function budgetAmountFor(account: { fxRateMicros: number | null }, minor: number
 // ---------------------------------------------------------------------------
 
 export const transactionsRoute = new Hono<AppEnv>();
-transactionsRoute.use('*', requireBudgetMember('viewer'));
+transactionsRoute.use('*', requireBudgetMember);
 
-transactionsRoute.post('/', requireBudgetMember('editor'), async (c) => {
+transactionsRoute.post('/', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = createTransactionSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -220,7 +220,7 @@ transactionsRoute.post('/', requireBudgetMember('editor'), async (c) => {
   return c.json({ transactionId: id }, 201);
 });
 
-transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async (c) => {
+transactionsRoute.patch('/:transactionId', async (c) => {
   const budgetId = budgetIdParam(c);
   const transactionId = c.req.param('transactionId');
   const parsed = updateTransactionSchema.safeParse(await c.req.json().catch(() => null));
@@ -370,7 +370,7 @@ transactionsRoute.patch('/:transactionId', requireBudgetMember('editor'), async 
   return c.json({ status: 'ok' });
 });
 
-transactionsRoute.delete('/:transactionId', requireBudgetMember('editor'), async (c) => {
+transactionsRoute.delete('/:transactionId', async (c) => {
   const budgetId = budgetIdParam(c);
   const transactionId = c.req.param('transactionId');
   const db = getDb(c.env);
@@ -640,7 +640,7 @@ transactionsRoute.get('/:transactionId/transfer-candidates', async (c) => {
   return c.json({ candidates });
 });
 
-transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('editor'), async (c) => {
+transactionsRoute.post('/:transactionId/link-transfer', async (c) => {
   const budgetId = budgetIdParam(c);
   const transactionId = c.req.param('transactionId');
   const parsed = linkTransferSchema.safeParse(await c.req.json().catch(() => null));
@@ -874,7 +874,7 @@ transactionsRoute.post('/:transactionId/link-transfer', requireBudgetMember('edi
 // unlinked row would be a lie). Deliberately available for links this
 // endpoint didn't create too — a transfer entered by hand can be split
 // back apart without deleting and re-entering both halves.
-transactionsRoute.post('/:transactionId/unlink-transfer', requireBudgetMember('editor'), async (c) => {
+transactionsRoute.post('/:transactionId/unlink-transfer', async (c) => {
   const budgetId = budgetIdParam(c);
   const transactionId = c.req.param('transactionId');
   const db = getDb(c.env);
@@ -1010,7 +1010,7 @@ async function clearPairedPaymentCategories(db: Db, budgetId: string, legIds: st
 // ---------------------------------------------------------------------------
 
 export const accountRegisterRoute = new Hono<AppEnv>();
-accountRegisterRoute.use('*', requireBudgetMember('viewer'));
+accountRegisterRoute.use('*', requireBudgetMember);
 
 accountRegisterRoute.get('/', async (c) => {
   const budgetId = budgetIdParam(c);

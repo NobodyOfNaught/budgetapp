@@ -31,7 +31,7 @@ function toRuleView(row: typeof payeeRules.$inferSelect) {
 }
 
 export const payeeRulesRoute = new Hono<AppEnv>();
-payeeRulesRoute.use('*', requireBudgetMember('viewer'));
+payeeRulesRoute.use('*', requireBudgetMember);
 
 payeeRulesRoute.get('/', async (c) => {
   const budgetId = budgetIdParam(c);
@@ -44,7 +44,7 @@ payeeRulesRoute.get('/', async (c) => {
   return c.json({ rules: rows.map(toRuleView) });
 });
 
-payeeRulesRoute.post('/', requireBudgetMember('editor'), async (c) => {
+payeeRulesRoute.post('/', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = upsertSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -70,7 +70,7 @@ payeeRulesRoute.post('/', requireBudgetMember('editor'), async (c) => {
   return c.json({ rule: { id, matchText: input.matchText, payeeName: input.payeeName, categoryId: input.categoryId ?? null } }, 201);
 });
 
-payeeRulesRoute.patch('/:ruleId', requireBudgetMember('editor'), async (c) => {
+payeeRulesRoute.patch('/:ruleId', async (c) => {
   const budgetId = budgetIdParam(c);
   const ruleId = c.req.param('ruleId');
   const parsed = upsertSchema.partial().safeParse(await c.req.json().catch(() => null));
@@ -99,7 +99,7 @@ payeeRulesRoute.patch('/:ruleId', requireBudgetMember('editor'), async (c) => {
   return c.json({ status: 'ok' });
 });
 
-payeeRulesRoute.delete('/:ruleId', requireBudgetMember('editor'), async (c) => {
+payeeRulesRoute.delete('/:ruleId', async (c) => {
   const budgetId = budgetIdParam(c);
   const ruleId = c.req.param('ruleId');
   const db = getDb(c.env);
@@ -124,7 +124,7 @@ payeeRulesRoute.delete('/:ruleId', requireBudgetMember('editor'), async (c) => {
  * not silently redo that. A row a rule does NOT match is left exactly as
  * it was; this only fixes what a new or edited rule now covers.
  */
-payeeRulesRoute.post('/apply', requireBudgetMember('editor'), async (c) => {
+payeeRulesRoute.post('/apply', async (c) => {
   const budgetId = budgetIdParam(c);
   const db = getDb(c.env);
 

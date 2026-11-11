@@ -223,7 +223,7 @@ async function reconcileAgainstStatement(
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export const importsRoute = new Hono<AppEnv>();
-importsRoute.use('*', requireBudgetMember('viewer'));
+importsRoute.use('*', requireBudgetMember);
 
 importsRoute.get('/providers', (c) => c.json({ providers: IMPORT_PROVIDERS }));
 
@@ -259,10 +259,8 @@ const wiseProbeSchema = z.object({
  * POST rather than GET because the token travels in the body: a query
  * string would land in access logs and browser history. Returns ids,
  * counts and status only — never amounts, payees, or the token itself.
- * Gated on 'owner': whoever runs this is handing over credentials to an
- * external financial service, which is not a shared editor's call.
  */
-importsRoute.post('/wise/probe', requireBudgetMember('owner'), async (c) => {
+importsRoute.post('/wise/probe', async (c) => {
   const parsed = wiseProbeSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
   const { token, start, end, includeRaw } = parsed.data;
@@ -363,12 +361,10 @@ async function resolveFetchRange(
  * then applies unchanged and un-duplicated, and a fetch that goes wrong
  * costs nothing because nothing was written.
  *
- * Gated on 'editor', not 'owner'. Storing a credential is an owner action
- * (see src/routes/import-connections.ts); USING one that an owner already
- * stored is ordinary import work, and an editor never sees the secret —
- * only its effects. A one-off typed token is likewise the caller's own.
+ * Using a stored connection never exposes its secret, only its effects —
+ * see src/routes/import-connections.ts for the write-only rule.
  */
-importsRoute.post('/wise/fetch', requireBudgetMember('editor'), async (c) => {
+importsRoute.post('/wise/fetch', async (c) => {
   const parsed = wiseFetchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
   const { token, connectionId, start: wantStart, end: wantEnd } = parsed.data;
@@ -432,7 +428,7 @@ importsRoute.post('/wise/fetch', requireBudgetMember('editor'), async (c) => {
  * is 0 against an empty selection, so nothing is ever written even if this
  * result were mistakenly fed to POST / directly).
  */
-importsRoute.post('/inspect', requireBudgetMember('editor'), async (c) => {
+importsRoute.post('/inspect', async (c) => {
   const parsed = inspectSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
   const input = parsed.data;
@@ -580,7 +576,7 @@ importsRoute.get('/review', async (c) => {
   return c.json({ transactions: rows.map((r) => ({ ...r, isSplit: splitParentIds.has(r.id) })) });
 });
 
-importsRoute.patch('/review', requireBudgetMember('editor'), async (c) => {
+importsRoute.patch('/review', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = reviewUpdateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -618,7 +614,7 @@ importsRoute.patch('/review', requireBudgetMember('editor'), async (c) => {
   return c.json({ status: 'ok', updated: parsed.data.updates.length });
 });
 
-importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
+importsRoute.post('/', async (c) => {
   const budgetId = budgetIdParam(c);
   const parsed = importSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
@@ -986,7 +982,7 @@ importsRoute.post('/', requireBudgetMember('editor'), async (c) => {
 // cascade the single-transaction delete already uses closes all three —
 // including reaching outside the batch when a sibling lives there, exactly
 // like deleting either leg by hand already does.
-importsRoute.delete('/:batchId', requireBudgetMember('editor'), async (c) => {
+importsRoute.delete('/:batchId', async (c) => {
   const budgetId = budgetIdParam(c);
   const batchId = c.req.param('batchId');
   const db = getDb(c.env);

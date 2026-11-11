@@ -88,7 +88,7 @@ export function WiseFetchPanel({
       setConnections(listed.connections);
       setKeyConfigured(listed.credentialsKeyConfigured);
     } catch {
-      // A viewer, or an environment without the table — either way the
+      // An environment without the table or the key — either way the
       // panel still works with a typed token, so this is not an error to
       // put in front of the user.
       setConnections([]);

@@ -107,11 +107,9 @@ export async function markConnectionUsed(db: Db, connectionId: string, now: numb
 
 export const importConnectionsRoute = new Hono<AppEnv>();
 
-// Listing is metadata only, so a viewer may see THAT a connection exists
-// without being able to use or read it. Everything that writes requires
-// owner: storing a credential for an external financial service is not a
-// shared editor's call.
-importConnectionsRoute.use('*', requireBudgetMember('viewer'));
+// Listing is metadata only — the secret itself is never returned to
+// anyone, its owner included (see the header above).
+importConnectionsRoute.use('*', requireBudgetMember);
 
 importConnectionsRoute.get('/', async (c) => {
   const db = getDb(c.env);
@@ -133,7 +131,7 @@ importConnectionsRoute.get('/', async (c) => {
   return c.json({ connections, credentialsKeyConfigured: !!c.env.CREDENTIALS_KEY });
 });
 
-importConnectionsRoute.post('/', requireBudgetMember('owner'), async (c) => {
+importConnectionsRoute.post('/', async (c) => {
   const parsed = createSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
   const { provider, label, credential } = parsed.data;
@@ -163,7 +161,7 @@ importConnectionsRoute.post('/', requireBudgetMember('owner'), async (c) => {
   return c.json({ connection: { id, provider, label, externalId: null, lastUsedAt: null, createdAt: now } }, 201);
 });
 
-importConnectionsRoute.put('/:connectionId', requireBudgetMember('owner'), async (c) => {
+importConnectionsRoute.put('/:connectionId', async (c) => {
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
   const { label, credential } = parsed.data;
@@ -204,7 +202,7 @@ importConnectionsRoute.put('/:connectionId', requireBudgetMember('owner'), async
   return c.json({ status: 'ok' });
 });
 
-importConnectionsRoute.delete('/:connectionId', requireBudgetMember('owner'), async (c) => {
+importConnectionsRoute.delete('/:connectionId', async (c) => {
   const db = getDb(c.env);
   const now = Date.now();
   const budgetId = budgetIdParam(c);

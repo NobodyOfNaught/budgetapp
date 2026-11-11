@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import type { Hono } from 'hono';
 import { createApp } from '../src/index';
+import { anyoneMaySignIn } from '../src/auth/sign-in-policy';
 import type { EmailSender, MagicLinkEmail } from '../src/lib/email';
 import type { AppEnv } from '../src/types/hono';
 
@@ -69,6 +70,7 @@ const TABLES_CHILDREN_FIRST = [
   'budgets',
   'sessions',
   'auth_tokens',
+  'api_tokens',
   'users',
 ];
 
@@ -91,7 +93,7 @@ export async function signInNewUser(
   email: string,
 ): Promise<{ app: Hono<AppEnv>; sessionCookie: string; budgetId: string }> {
   const emailSender = new CapturingEmailSender();
-  const app = createApp(emailSender);
+  const app = createApp(emailSender, anyoneMaySignIn);
 
   const linkRes = await call(
     app,

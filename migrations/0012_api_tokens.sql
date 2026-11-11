@@ -7,6 +7,10 @@
 -- that is not a browser session — a session cookie is bound to a browser,
 -- expires on a sliding 30-day window, and carries the owner's FULL authority.
 --
+-- (PR 32 widened this: a token now has full authority over the budget routes,
+-- minus token management and /auth. The paragraph below describes the
+-- original imports-only design.)
+--
 -- So a token is deliberately narrower than a session: src/auth/middleware.ts
 -- admits a token only to an explicit allowlist of routes (read the budget and
 -- its accounts, run an import). It cannot mint or list tokens, edit or delete

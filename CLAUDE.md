@@ -155,8 +155,14 @@ NODE_USE_ENV_PROXY=1 node scripts/import-statement.mjs \
   for the site's host via the `request_credential` tool; the session proxy injects
   the `Authorization` header. If a call returns 401, ask for the credential with
   `request_credential` — never ask the owner to paste the token.
-- **A token can only read the budget/accounts and run imports.** It cannot edit or
-  delete anything, and every imported row lands unapproved for the owner's review.
+- **A token has the owner's full authority over the budget routes** — it can edit and
+  delete accounts, transactions and categories, not just import. The owner asked for
+  this explicitly (PR 32). It still cannot create or list tokens or touch `/auth`.
+  Make changes with `scripts/budget-api.mjs` (same proxy-injected token):
+  `NODE_USE_ENV_PROXY=1 node scripts/budget-api.mjs --env prod PATCH /accounts/ID '{...}'`.
+  Because that includes destructive calls, say what you are about to change before
+  deleting or bulk-editing, and prefer reversible edits; D1 Time Travel is the backstop.
+  Imported rows land unapproved for the owner's review.
 - **Imports go to `prod` directly** — they are data, not deploys, so the uat-first
   gate above does not apply. Use `--dry-run` first when unsure which account a file
   belongs to, and report the balance-check line the script prints; a mismatch is

@@ -1197,6 +1197,27 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 32 — API tokens get full authority over the budget
+
+PR 31 deliberately limited a token to an imports-only allowlist, so a leaked one could at
+worst add unapproved, undoable rows. The owner then said they want Claude to make changes
+on their behalf, not just import (for example setting an account's start date, which the
+import-only token could not do and which blocked a Vancity Gold import).
+
+The allowlist is removed: within `/api/v1/budgets/*` a token now has the owner's full
+authority, including edits and deletes. What stays session-only is exactly the credential
+surface — `/api/v1/api-tokens` and `/api/v1/auth` — so a token still cannot mint, list or
+sign anything in. The remaining protections for a leaked token are one-click revocation,
+hash-only storage, `last_used_at` to spot unexpected use, and D1 Time Travel for recovery.
+
+This is a trade, made explicitly by the owner: convenience and autonomy for Claude against
+a larger blast radius if the token leaks. The token is held only as a proxy-injected
+network credential and never appears in chat, a file or a command line.
+
+The test that asserted a token was refused PATCH/transactions/review was inverted rather
+than deleted, with the reason recorded inline. `scripts/budget-api.mjs` is the general
+client; `scripts/import-statement.mjs` remains the import one.
+
 ### PR 31 — One person's site, and statements imported through Claude
 
 Two changes in direction from the owner: the site is theirs alone, and statement files now

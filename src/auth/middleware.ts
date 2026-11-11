@@ -29,43 +29,27 @@ export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
 };
 
 /**
- * What an API token may do: method + path pattern, nothing else. Everything
- * not listed is a 403 for a token, even where a session would be allowed.
- *
- * The list is the import workflow and the reads it needs, no more: find the
- * budget, find the account, run the import (and Splitwise's inspect step,
- * which reads a file's member names so the import can choose them). It
- * excludes, on purpose, everything that edits or deletes existing data —
- * a token that leaks can at worst add rows that land UNAPPROVED in the
- * review queue, every one of them undoable as a batch.
- */
-const API_TOKEN_ROUTES: ReadonlyArray<readonly [string, RegExp]> = [
-  ['GET', /^\/api\/v1\/budgets\/?$/],
-  ['GET', /^\/api\/v1\/budgets\/[^/]+\/?$/],
-  ['GET', /^\/api\/v1\/budgets\/[^/]+\/accounts\/?$/],
-  ['POST', /^\/api\/v1\/budgets\/[^/]+\/imports\/?$/],
-  ['POST', /^\/api\/v1\/budgets\/[^/]+\/imports\/inspect\/?$/],
-];
-
-export function isApiTokenRoute(method: string, path: string): boolean {
-  return API_TOKEN_ROUTES.some(([m, re]) => m === method && re.test(path));
-}
-
-/**
  * Accepts a session cookie OR an `Authorization: Bearer` API token
- * (migrations/0012). Used on the budget routes only; /auth/* stays
- * session-only via plain `requireAuth`, so a token can never mint tokens,
- * read /me, or sign out a browser.
+ * (migrations/0012). Used on the budget routes only; /auth/* and
+ * /api-tokens stay session-only via plain `requireAuth`, so a token can
+ * never mint tokens, list them, read /me, or sign out a browser.
+ *
+ * WITHIN the budget routes a token has the owner's full authority: it can
+ * read, edit and delete budget data and run imports. That is deliberate —
+ * the owner asked for Claude to make changes on their behalf, not only
+ * import — and it was widened from an imports-only allowlist (PR 31) in
+ * PR 32. The protections that remain are the ones that still matter for a
+ * leaked token: it is revocable in one click, only its hash is stored,
+ * `last_used_at` shows unexpected use, the data is recoverable via D1 Time
+ * Travel, and it cannot create further credentials.
  *
  * A request that presents a bearer header is judged on the token ALONE —
  * an invalid token is a 401 even if a valid session cookie rides along,
- * rather than silently falling back to the cookie. A client that thinks it
- * is using a token should learn that it isn't.
+ * rather than silently falling back to the cookie.
  *
  * CSRF is unaffected: the same-origin check in src/lib/csrf.ts still runs
  * first on every mutation, and a token client simply sends a matching
- * Origin header. A browser cannot attach an Authorization header to a
- * cross-site request without a CORS preflight this app never grants.
+ * Origin header.
  */
 export const requireAuthOrApiToken: MiddlewareHandler<AppEnv> = async (c, next) => {
   const header = c.req.header('Authorization');
@@ -81,10 +65,6 @@ export const requireAuthOrApiToken: MiddlewareHandler<AppEnv> = async (c, next) 
     .where(and(eq(apiTokens.tokenHash, await sha256Hex(match[1])), isNull(apiTokens.revokedAt)))
     .limit(1);
   if (!row) return c.json({ error: 'unauthorized' }, 401);
-
-  if (!isApiTokenRoute(c.req.method, c.req.path)) {
-    return c.json({ error: 'forbidden', detail: 'API tokens may only read the budget and run imports' }, 403);
-  }
 
   const [user] = await db.select().from(users).where(eq(users.id, row.userId)).limit(1);
   if (!user) return c.json({ error: 'unauthorized' }, 401);

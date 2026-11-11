@@ -3,7 +3,8 @@ import { call, callJson, req, resetDb, signInNewUser } from './helpers';
 
 // The import API (migrations/0012): Claude posts statement files with a
 // bearer token instead of the owner uploading them in a browser. The token
-// is deliberately narrower than a session — see API_TOKEN_ROUTES in
+// has the owner's full authority over the budget routes (PR 32) but cannot
+// manage tokens or touch /auth — see requireAuthOrApiToken in
 // src/auth/middleware.ts.
 
 beforeEach(resetDb);
@@ -105,22 +106,45 @@ describe('what a token can do', () => {
   });
 });
 
-describe('what a token can NOT do', () => {
-  it('cannot edit, delete or browse beyond the import allowlist', async () => {
-    const { app, secret, budgetId, accountId } = await setup('tok-scope@example.com');
-    const refused: [string, string, unknown?][] = [
-      ['PATCH', `/api/v1/budgets/${budgetId}/accounts/${accountId}`, { name: 'renamed' }],
-      ['GET', `/api/v1/budgets/${budgetId}/transactions`],
-      ['POST', `/api/v1/budgets/${budgetId}/transactions`, {}],
-      ['GET', `/api/v1/budgets/${budgetId}/imports/review`],
-      ['POST', `/api/v1/budgets/${budgetId}/import-connections`, {}],
-    ];
-    for (const [method, path, body] of refused) {
-      const res = await withToken(app, secret, path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
-      expect(res.status, `${method} ${path}`).toBe(403);
-    }
+describe('what a token can do beyond importing', () => {
+  // This replaces a test that asserted a token was REFUSED these exact
+  // routes (PATCH account, create/list transactions, review queue,
+  // connections). That was the PR 31 design: imports only. The owner then
+  // asked for Claude to make changes on their behalf, so the allowlist was
+  // removed (PR 32) and the expectation inverts: these now succeed.
+  it('edits accounts, creates and reads transactions, and reads the review queue', async () => {
+    const { app, secret, budgetId, accountId } = await setup('tok-full@example.com');
+
+    const rename = await withToken(app, secret, `/api/v1/budgets/${budgetId}/accounts/${accountId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Vancity Visa (renamed)', importStartDate: '2026-08-19' }),
+    });
+    expect(rename.status).toBe(200);
+
+    const created = await withToken(app, secret, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-09-01', amount: '-12.34', payeeName: 'Test' }),
+    });
+    expect(created.status).toBe(201);
+
+    // Transactions are read per account, through the register route.
+    expect((await withToken(app, secret, `/api/v1/budgets/${budgetId}/accounts/${accountId}/transactions`)).status).toBe(200);
+    expect((await withToken(app, secret, `/api/v1/budgets/${budgetId}/imports/review`)).status).toBe(200);
   });
 
+  it('deletes a transaction', async () => {
+    const { app, secret, budgetId, accountId } = await setup('tok-del@example.com');
+    const created = await withToken(app, secret, `/api/v1/budgets/${budgetId}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'ordinary', accountId, date: '2026-09-01', amount: '-5.00', payeeName: 'Gone' }),
+    });
+    const { transactionId } = await created.json<{ transactionId: string }>();
+    const del = await withToken(app, secret, `/api/v1/budgets/${budgetId}/transactions/${transactionId}`, { method: 'DELETE' });
+    expect(del.status).toBe(200);
+  });
+});
+
+describe('what a token can NOT do', () => {
   it('cannot reach token management or /auth — those are session-only', async () => {
     const { app, secret } = await setup('tok-mgmt@example.com');
     for (const [method, path] of [

@@ -69,8 +69,8 @@ export function ApiTokens() {
     <details style={{ marginBlock: '1rem' }}>
       <summary>API tokens ({tokens.length})</summary>
       <p style={{ color: '#666', fontSize: '0.9em' }}>
-        A token lets Claude import statement files for you. It can read your budget and accounts and run imports —
-        nothing else: it cannot edit or delete transactions, and imported rows land unapproved for your review.
+        A token lets Claude work on your budget on your behalf: import statements, and edit or delete accounts,
+        transactions and categories. It cannot create or list tokens. Revoke it here at any time.
       </p>
       {tokens.length > 0 && (
         <ul>

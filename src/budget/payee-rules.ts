@@ -22,6 +22,8 @@ export async function loadActivePayeeRules(db: Db, budgetId: string): Promise<Pa
       matchText: payeeRules.matchText,
       payeeName: payeeRules.payeeName,
       categoryId: payeeRules.categoryId,
+      amountMinMinor: payeeRules.amountMinMinor,
+      amountMaxMinor: payeeRules.amountMaxMinor,
       ruleCategoryDeletedAt: categories.deletedAt,
     })
     .from(payeeRules)
@@ -34,5 +36,7 @@ export async function loadActivePayeeRules(db: Db, budgetId: string): Promise<Pa
     matchText: r.matchText,
     payeeName: r.payeeName,
     categoryId: r.categoryId !== null && r.ruleCategoryDeletedAt === null ? r.categoryId : null,
+    amountMinMinor: r.amountMinMinor,
+    amountMaxMinor: r.amountMaxMinor,
   }));
 }

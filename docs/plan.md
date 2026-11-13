@@ -1197,6 +1197,37 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 34 — Payee rules can be limited to a price range
+
+One merchant can mean different things at different prices. The owner's dance studio
+charges $20–$40 for a weekly class night and several times that for an event; both arrive as
+"DANCE JAM". A text-only rule can only give them one category, and the existing rule had none
+at all, so every one landed uncategorised.
+
+A rule can now carry an optional price band (`amount_min_minor`, `amount_max_minor`,
+migration 0013, both nullable). "DANCE JAM, up to $50" goes to the class category, and a plain
+"DANCE JAM" rule behind it catches the rest.
+
+**The band is measured in the budget's currency, not the account's.** This is the part that
+mattered in the owner's own data: the Canadian card's class night is CAD 57.45, which is over
+50 as printed and about $42 once converted. Judged natively it would land on the wrong side
+of a $50 line. The import compares the row's budget-currency amount (the same figure it
+stores), and "apply to review queue" compares each row's stored `budgetAmountMinor`. A test
+fails if the native figure is used instead.
+
+**It is a magnitude, so a refund falls in the same band as the charge.** A negative band end
+is rejected rather than stripped, since "-50" is far more likely a mistake than an intention.
+
+**Which rule wins** when several match, in order: the longer match text (unchanged); then a
+rule with a band over one without; then the narrower band; then the oldest. Text specificity
+still comes first, so a banded "DANCE JAM" does not beat a plain "DANCE JAM PRODUCTIONS".
+A banded rule is a claim about price, so with no amount known it is skipped rather than
+guessed at. Rules without a band behave exactly as before.
+
+On PATCH, a one-sided change is checked against the band already stored (sending only
+`amountMax: 10` looks fine alone but is below a stored `amountMin` of 20); `null` clears a
+side and omitting one leaves it alone.
+
 ### PR 33 — BECU's new download format, with none of BECU's categories
 
 BECU replaced its `Date, No., Description, Debit, Credit` download with a spreadsheet-style

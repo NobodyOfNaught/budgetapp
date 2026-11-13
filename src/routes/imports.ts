@@ -39,9 +39,11 @@ import type { AppEnv } from '../types/hono';
 function resolveImportPayee(
   rules: PayeeRule[],
   row: { payeeRaw: string | null; payeeName: string | null },
+  /** The row's amount in the budget's currency, for rules with a price band. */
+  budgetAmountMinor: number,
 ): { payeeName: string | null; ruleCategoryId: string | null } {
   const rawText = row.payeeRaw ?? '';
-  const match = rawText !== '' ? matchPayeeRule(rules, rawText) : null;
+  const match = rawText !== '' ? matchPayeeRule(rules, rawText, budgetAmountMinor) : null;
   if (match) return { payeeName: match.payeeName, ruleCategoryId: match.categoryId };
 
   const bestEffort = row.payeeName ?? row.payeeRaw;
@@ -823,7 +825,11 @@ importsRoute.post('/', async (c) => {
         continue;
       }
 
-      const resolved = resolveImportPayee(rules, row);
+      // Worth in the budget's currency — the same figure stored on the row
+      // below, computed first because a rule's price band is judged on it.
+      const rowRate = rateByAccountId.get(account.id);
+      const rowBudgetAmountMinor = rowRate !== undefined ? convertToBudgetMinor(row.amountMinor, rowRate) : row.amountMinor;
+      const resolved = resolveImportPayee(rules, row, rowBudgetAmountMinor);
       const payeeId = resolved.payeeName ? await getOrCreatePayee(db, budgetId, resolved.payeeName, now) : null;
       // A user rule outranks the provider's own category guess — an
       // explicit rule is more intentional than a label the file happened
@@ -856,10 +862,7 @@ importsRoute.post('/', async (c) => {
           // direction fix (src/import/wise.ts) made a top-up land here as
           // an ordinary row, at which point an unconverted CAD figure
           // would have been counted as budget-currency dollars outright.
-          budgetAmountMinor: (() => {
-            const rate = rateByAccountId.get(account.id);
-            return rate !== undefined ? convertToBudgetMinor(row.amountMinor, rate) : row.amountMinor;
-          })(),
+          budgetAmountMinor: rowBudgetAmountMinor,
           categoryId,
           payeeId,
           memo: row.memo,

@@ -386,4 +386,7 @@ export interface PayeeRule {
   matchText: string;
   payeeName: string;
   categoryId: string | null;
+  /** Inclusive price band in the budget's currency, minor units, as a magnitude; null = no limit on that side. */
+  amountMinMinor: number | null;
+  amountMaxMinor: number | null;
 }

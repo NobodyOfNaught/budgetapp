@@ -484,6 +484,11 @@ export const payeeRules = sqliteTable(
     matchText: text('match_text').notNull(),
     payeeName: text('payee_name').notNull(),
     categoryId: text('category_id').references(() => categories.id),
+    // Optional price band — non-negative magnitude, budget currency, minor
+    // units, inclusive. NULL means no limit on that side. See migrations/0013
+    // and src/import/rules.ts.
+    amountMinMinor: integer('amount_min_minor'),
+    amountMaxMinor: integer('amount_max_minor'),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     deletedAt: integer('deleted_at'),

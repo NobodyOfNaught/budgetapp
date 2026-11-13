@@ -1584,3 +1584,121 @@ ${rows.join('\n')}
     expect((body as unknown as { reconciliation: Reconciliation | null }).reconciliation).toBeNull();
   });
 });
+
+describe('payee rule price bands, through the real import path', () => {
+  // The owner's real case: a dance studio whose weekly class nights ($20-$40)
+  // and larger event charges both arrive as "DANCE JAM". Rows are the real
+  // Neo statement lines (Canadian dollars) — the point of the CAD account is
+  // that the band is judged in the BUDGET's currency.
+  const NEO_HEADER = 'Transaction Date,Posted Date,Status,Description,Amount';
+  const NEO_CLASS = '2026-08-14,2026-08-15,Posted,DANCE JAM PRODUCTIONS  DERWOOD       USA,-57.45'; // CAD 57.45 -> ~USD 41.94
+  const NEO_EVENT = '2026-08-07,2026-08-08,Posted,DANCE JAM PRODUCTIONS  DERWOOD       USA,-79.54'; // CAD 79.54 -> ~USD 58.07
+  const neoCsv = (...rows: string[]) => [NEO_HEADER, ...rows, ''].join('\n');
+
+  async function setup(email: string) {
+    const { app, sessionCookie, budgetId } = await signInNewUser(email);
+    const account = await createAccount(app, sessionCookie, budgetId, {
+      name: 'Neo',
+      type: 'credit_card',
+      currencyCode: 'CAD',
+      fxRate: '0.73',
+    });
+    const { body: cats } = await callJson<{ groups: { categories: { id: string; kind: string; name: string }[] }[] }>(
+      app,
+      sessionCookie,
+      `/api/v1/budgets/${budgetId}/categories`,
+    );
+    const spending = cats.groups.flatMap((g) => g.categories).filter((c) => c.kind === 'spending');
+    return { app, sessionCookie, budgetId, accountId: account.account.id, classCat: spending[0]!, eventCat: spending[1]! };
+  }
+
+  const rulesUrl = (budgetId: string) => `/api/v1/budgets/${budgetId}/payee-rules`;
+  const post = (app: App, cookie: string, budgetId: string, body: Record<string, unknown>) =>
+    callJson<{ rule: { amountMinMinor: number | null; amountMaxMinor: number | null } }>(app, cookie, rulesUrl(budgetId), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+  async function importNeo(ctx: Awaited<ReturnType<typeof setup>>, csvText: string) {
+    return callJson<ImportSummary>(ctx.app, ctx.sessionCookie, `/api/v1/budgets/${ctx.budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({ accountId: ctx.accountId, provider: 'neo', filename: 'neo.csv', csv: csvText }),
+    });
+  }
+
+  it('judges the band in the budget currency: CAD 57.45 is over 50 as printed but ~$42 once converted', async () => {
+    const ctx = await setup('band-fx@example.com');
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.classCat.id, amountMax: '50' });
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.eventCat.id });
+
+    await importNeo(ctx, neoCsv(NEO_CLASS, NEO_EVENT));
+
+    const rows = await review(ctx.app, ctx.sessionCookie, ctx.budgetId);
+    const byAmount = (minor: number) => rows.find((r) => r.amountMinor === minor)!;
+    // 57.45 CAD would have missed a "$50 and under" rule if compared natively.
+    expect(byAmount(-5745).categoryId).toBe(ctx.classCat.id);
+    expect(byAmount(-7954).categoryId).toBe(ctx.eventCat.id);
+  });
+
+  it('with no rule having a band, imports behave exactly as before', async () => {
+    const ctx = await setup('band-none@example.com');
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.eventCat.id });
+    await importNeo(ctx, neoCsv(NEO_CLASS, NEO_EVENT));
+    const rows = await review(ctx.app, ctx.sessionCookie, ctx.budgetId);
+    expect(rows.map((r) => r.categoryId)).toEqual([ctx.eventCat.id, ctx.eventCat.id]);
+  });
+
+  it('stores the band as a budget-currency magnitude and echoes it back', async () => {
+    const ctx = await setup('band-store@example.com');
+    const { status, body } = await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'X', payeeName: 'X', amountMin: '20', amountMax: '40.50' });
+    expect(status).toBe(201);
+    expect(body.rule).toMatchObject({ amountMinMinor: 2000, amountMaxMinor: 4050 });
+    const { body: list } = await callJson<{ rules: { amountMinMinor: number | null }[] }>(ctx.app, ctx.sessionCookie, rulesUrl(ctx.budgetId));
+    expect(list.rules[0]!.amountMinMinor).toBe(2000);
+  });
+
+  it('rejects a negative band end, an unreadable one, and a low end above the high end', async () => {
+    const ctx = await setup('band-invalid@example.com');
+    for (const bad of [{ amountMax: '-50' }, { amountMin: 'lots' }, { amountMin: '60', amountMax: '40' }]) {
+      const { status } = await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'X', payeeName: 'X', ...bad });
+      expect(status, JSON.stringify(bad)).toBe(400);
+    }
+  });
+
+  it('on PATCH, checks a one-sided change against the band already stored', async () => {
+    const ctx = await setup('band-patch@example.com');
+    const { body } = await callJson<{ rule: { id: string } }>(ctx.app, ctx.sessionCookie, rulesUrl(ctx.budgetId), {
+      method: 'POST',
+      body: JSON.stringify({ matchText: 'X', payeeName: 'X', amountMin: '20', amountMax: '40' }),
+    });
+    const patch = (b: Record<string, unknown>) =>
+      callJson(ctx.app, ctx.sessionCookie, `${rulesUrl(ctx.budgetId)}/${body.rule.id}`, { method: 'PATCH', body: JSON.stringify(b) });
+
+    // Sending only amountMax=10 looks fine on its own; it is below the stored min of 20.
+    expect((await patch({ amountMax: '10' })).status).toBe(400);
+    expect((await patch({ amountMax: '90' })).status).toBe(200);
+    // null clears a side; omitting a side leaves it alone.
+    expect((await patch({ amountMin: null })).status).toBe(200);
+    const { body: list } = await callJson<{ rules: { amountMinMinor: number | null; amountMaxMinor: number | null }[] }>(
+      ctx.app,
+      ctx.sessionCookie,
+      rulesUrl(ctx.budgetId),
+    );
+    expect(list.rules[0]).toMatchObject({ amountMinMinor: null, amountMaxMinor: 9000 });
+  });
+
+  it('"apply to review queue" uses the same band, judged on each row\'s budget amount', async () => {
+    const ctx = await setup('band-apply@example.com');
+    await importNeo(ctx, neoCsv(NEO_CLASS, NEO_EVENT)); // imported BEFORE any rule exists
+    expect((await review(ctx.app, ctx.sessionCookie, ctx.budgetId)).every((r) => r.categoryId === null)).toBe(true);
+
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.classCat.id, amountMax: '50' });
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.eventCat.id });
+    const { body } = await callJson<{ updated: number }>(ctx.app, ctx.sessionCookie, `${rulesUrl(ctx.budgetId)}/apply`, { method: 'POST' });
+    expect(body.updated).toBe(2);
+
+    const rows = await review(ctx.app, ctx.sessionCookie, ctx.budgetId);
+    expect(rows.find((r) => r.amountMinor === -5745)!.categoryId).toBe(ctx.classCat.id);
+    expect(rows.find((r) => r.amountMinor === -7954)!.categoryId).toBe(ctx.eventCat.id);
+  });
+});

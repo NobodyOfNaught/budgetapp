@@ -64,7 +64,17 @@ describe('GET/POST /payee-rules', () => {
     const { app, sessionCookie, budgetId } = await signInNewUser('rules-create@example.com');
     const { status, body } = await createRule(app, sessionCookie, budgetId, { matchText: 'GIANT FOOD', payeeName: 'Giant Food' });
     expect(status).toBe(201);
-    expect(body.rule).toEqual({ id: body.rule.id, matchText: 'GIANT FOOD', payeeName: 'Giant Food', categoryId: null });
+    // The response gained amountMinMinor/amountMaxMinor with price bands
+    // (PR 34). A rule created without a band has both null — i.e. exactly the
+    // old behaviour — so the original four fields are unchanged.
+    expect(body.rule).toEqual({
+      id: body.rule.id,
+      matchText: 'GIANT FOOD',
+      payeeName: 'Giant Food',
+      categoryId: null,
+      amountMinMinor: null,
+      amountMaxMinor: null,
+    });
 
     const rules = await listRules(app, sessionCookie, budgetId);
     expect(rules).toHaveLength(1);

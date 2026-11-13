@@ -17,12 +17,14 @@ function minorToField(minor: number | null): string {
   return cents === 0 ? String(whole) : `${whole}.${String(cents).padStart(2, '0')}`;
 }
 
-/** The band as a short phrase for the table: "up to 50", "over 50 ", "20 – 40", or "" when there is none. */
-function describeBand(min: number | null, max: number | null): string {
-  if (min === null && max === null) return 'any amount';
-  if (min === null) return `up to ${minorToField(max)}`;
-  if (max === null) return `${minorToField(min)} and over`;
-  return `${minorToField(min)} – ${minorToField(max)}`;
+/** The price conditions as a short phrase for the table: "multiple of 20, up to 60", "over 100", or "any amount". */
+function describeBand(min: number | null, max: number | null, multiple: number | null): string {
+  const parts: string[] = [];
+  if (multiple !== null) parts.push(`a multiple of ${minorToField(multiple)}`);
+  if (min !== null && max !== null) parts.push(`${minorToField(min)} – ${minorToField(max)}`);
+  else if (min !== null) parts.push(`${minorToField(min)} and over`);
+  else if (max !== null) parts.push(`up to ${minorToField(max)}`);
+  return parts.length === 0 ? 'any amount' : parts.join(', ');
 }
 
 export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; categoryGroups: CategoryGroup[] }) {
@@ -32,6 +34,7 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
   const [categoryId, setCategoryId] = useState('');
   const [amountMin, setAmountMin] = useState('');
   const [amountMax, setAmountMax] = useState('');
+  const [amountMultiple, setAmountMultiple] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
@@ -55,6 +58,7 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
     setCategoryId(rule.categoryId ?? '');
     setAmountMin(minorToField(rule.amountMinMinor));
     setAmountMax(minorToField(rule.amountMaxMinor));
+    setAmountMultiple(minorToField(rule.amountMultipleMinor));
   }
 
   function resetForm() {
@@ -64,6 +68,7 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
     setCategoryId('');
     setAmountMin('');
     setAmountMax('');
+    setAmountMultiple('');
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -79,6 +84,7 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
         categoryId: categoryId || null,
         amountMin: amountMin.trim() || null,
         amountMax: amountMax.trim() || null,
+        amountMultiple: amountMultiple.trim() || null,
       });
       if (editingId) {
         await apiFetch(`/budgets/${budgetId}/payee-rules/${editingId}`, { method: 'PATCH', body });
@@ -116,9 +122,11 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
       </p>
       <p style={{ color: '#666' }}>
         A rule can also be limited to a price range, so one merchant can mean different things at different prices — for example a
-        studio&apos;s $20–$40 weekly class versus its larger event charges. Give the small charges their own rule with a range, and
-        add a plain rule with no range behind it for everything else: the rule with a range wins whenever the amount fits. Amounts
-        are compared in your budget&apos;s currency, ignoring whether it is a charge or a refund.
+        studio&apos;s flat-rate $20 / $40 / $60 class nights versus its larger event charges. Give the flat-rate charges their own rule
+        (&quot;a multiple of&quot; 20, up to 60), give the big ones another (from 100.01), and add a plain rule with no category behind
+        them so everything in between is named but left for you to confirm: the most specific rule that fits wins. Amounts are compared
+        in your budget&apos;s currency, ignoring whether it is a charge or a refund. A charge made on a card in another currency is
+        allowed a few percent of exchange-fee skew, in one direction, so a $40 price that arrives as CAD 57 still counts as $40.
       </p>
 
       <form onSubmit={handleSubmit} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -148,6 +156,10 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
         <label>
           to{' '}
           <input value={amountMax} onChange={(e) => setAmountMax(e.target.value)} placeholder="any" inputMode="decimal" style={{ width: '5rem' }} />
+        </label>
+        <label>
+          a multiple of{' '}
+          <input value={amountMultiple} onChange={(e) => setAmountMultiple(e.target.value)} placeholder="any" inputMode="decimal" style={{ width: '5rem' }} />
         </label>
         <button type="submit" disabled={submitting}>
           {editingId ? 'Save rule' : 'Add rule'}
@@ -187,7 +199,7 @@ export function PayeeRules({ budgetId, categoryGroups }: { budgetId: string; cat
                   <td>{rule.matchText}</td>
                   <td>{rule.payeeName}</td>
                   <td>{categoryLabel(rule.categoryId)}</td>
-                  <td>{describeBand(rule.amountMinMinor, rule.amountMaxMinor)}</td>
+                  <td>{describeBand(rule.amountMinMinor, rule.amountMaxMinor, rule.amountMultipleMinor)}</td>
                   <td>
                     <button onClick={() => startEdit(rule)}>Edit</button> <button onClick={() => handleDelete(rule.id)}>Delete</button>
                   </td>

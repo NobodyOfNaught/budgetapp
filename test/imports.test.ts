@@ -1640,6 +1640,58 @@ describe('payee rule price bands, through the real import path', () => {
     expect(byAmount(-7954).categoryId).toBe(ctx.eventCat.id);
   });
 
+  it('flat-rate rules end to end: multiples of $20 to Hollywood, over $100 to Events, the rest left to confirm', async () => {
+    const ctx = await setup('band-multiple@example.com');
+    const confirmRule = { matchText: 'DANCE JAM', payeeName: 'Dance Jam' }; // no category, no condition
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { ...confirmRule });
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { ...confirmRule, categoryId: ctx.classCat.id, amountMultiple: '20', amountMax: '60' });
+    await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { ...confirmRule, categoryId: ctx.eventCat.id, amountMin: '100.01' });
+
+    // The Neo card is CAD (stored rate 0.73), so these are the CONVERTED
+    // cases: CAD 57.45 is the $40 class night at $41.94; CAD 79.54 is
+    // $58.06, close to — but not — the $60 class price.
+    await importNeo(ctx, neoCsv(NEO_CLASS, NEO_EVENT));
+    const neoRows = await review(ctx.app, ctx.sessionCookie, ctx.budgetId);
+    expect(neoRows.find((r) => r.amountMinor === -5745)!.categoryId).toBe(ctx.classCat.id);
+    expect(neoRows.find((r) => r.amountMinor === -7954)!.categoryId).toBeNull(); // left to confirm
+
+    // And the exact case, on an account in the budget's own currency (USD),
+    // with the owner's real BECU rows: $40 and $30. $40 is a flat rate;
+    // $30 is not, so it too is left to confirm.
+    const usd = await createAccount(ctx.app, ctx.sessionCookie, ctx.budgetId, { name: 'BECU', type: 'checking' });
+    const becuRow = (date: string, amount: string) =>
+      `"${date}","","POS Withdrawal - DANCE JAM PRODUCTIONS 17801 Bowie Mill Rd    DERWOOD      MD - Card Ending In 5957","${amount}",""`;
+    await callJson(ctx.app, ctx.sessionCookie, `/api/v1/budgets/${ctx.budgetId}/imports`, {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: usd.account.id,
+        provider: 'becu',
+        filename: 'becu.csv',
+        csv: ['"Date","No.","Description","Debit","Credit"', becuRow('11/1/2026', '-40.00'), becuRow('11/2/2026', '-30.00'), ''].join('\n'),
+      }),
+    });
+    const all = await review(ctx.app, ctx.sessionCookie, ctx.budgetId);
+    const usdRows = all.filter((r) => r.accountName === 'BECU');
+    expect(usdRows.find((r) => r.amountMinor === -4000)!.categoryId).toBe(ctx.classCat.id);
+    expect(usdRows.find((r) => r.amountMinor === -3000)!.categoryId).toBeNull();
+    // Every one of them is named by the fallback rule either way.
+    expect(all.every((r) => r.payeeName === 'Dance Jam')).toBe(true);
+  });
+
+  it('rejects a "multiple of" that is zero or negative, and stores a valid one', async () => {
+    const ctx = await setup('band-multiple-invalid@example.com');
+    for (const bad of ['0', '-20', 'twenty']) {
+      const { status } = await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'X', payeeName: 'X', amountMultiple: bad });
+      expect(status, bad).toBe(400);
+    }
+    const { status, body } = await callJson<{ rule: { amountMultipleMinor: number | null } }>(ctx.app, ctx.sessionCookie, rulesUrl(ctx.budgetId), {
+      method: 'POST',
+      body: JSON.stringify({ matchText: 'X', payeeName: 'X', amountMultiple: '20' }),
+    });
+    expect(status).toBe(201);
+    expect(body.rule.amountMultipleMinor).toBe(2000);
+  });
+
   it('with no rule having a band, imports behave exactly as before', async () => {
     const ctx = await setup('band-none@example.com');
     await post(ctx.app, ctx.sessionCookie, ctx.budgetId, { matchText: 'DANCE JAM', payeeName: 'Dance Jam', categoryId: ctx.eventCat.id });

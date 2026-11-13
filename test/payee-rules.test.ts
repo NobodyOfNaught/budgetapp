@@ -74,6 +74,7 @@ describe('GET/POST /payee-rules', () => {
       categoryId: null,
       amountMinMinor: null,
       amountMaxMinor: null,
+      amountMultipleMinor: null,
     });
 
     const rules = await listRules(app, sessionCookie, budgetId);

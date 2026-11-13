@@ -489,6 +489,9 @@ export const payeeRules = sqliteTable(
     // and src/import/rules.ts.
     amountMinMinor: integer('amount_min_minor'),
     amountMaxMinor: integer('amount_max_minor'),
+    // A positive step: the price must be a whole multiple of it. See
+    // migrations/0014 and src/import/rules.ts.
+    amountMultipleMinor: integer('amount_multiple_minor'),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     deletedAt: integer('deleted_at'),

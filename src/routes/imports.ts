@@ -41,9 +41,11 @@ function resolveImportPayee(
   row: { payeeRaw: string | null; payeeName: string | null },
   /** The row's amount in the budget's currency, for rules with a price band. */
   budgetAmountMinor: number,
+  /** True when the row was charged in a currency other than the budget's, so `budgetAmountMinor` is an estimate. */
+  approximate: boolean,
 ): { payeeName: string | null; ruleCategoryId: string | null } {
   const rawText = row.payeeRaw ?? '';
-  const match = rawText !== '' ? matchPayeeRule(rules, rawText, budgetAmountMinor) : null;
+  const match = rawText !== '' ? matchPayeeRule(rules, rawText, budgetAmountMinor, { approximate }) : null;
   if (match) return { payeeName: match.payeeName, ruleCategoryId: match.categoryId };
 
   const bestEffort = row.payeeName ?? row.payeeRaw;
@@ -829,7 +831,7 @@ importsRoute.post('/', async (c) => {
       // below, computed first because a rule's price band is judged on it.
       const rowRate = rateByAccountId.get(account.id);
       const rowBudgetAmountMinor = rowRate !== undefined ? convertToBudgetMinor(row.amountMinor, rowRate) : row.amountMinor;
-      const resolved = resolveImportPayee(rules, row, rowBudgetAmountMinor);
+      const resolved = resolveImportPayee(rules, row, rowBudgetAmountMinor, row.currencyCode !== budget.currencyCode);
       const payeeId = resolved.payeeName ? await getOrCreatePayee(db, budgetId, resolved.payeeName, now) : null;
       // A user rule outranks the provider's own category guess — an
       // explicit rule is more intentional than a label the file happened

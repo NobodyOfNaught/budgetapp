@@ -5,7 +5,7 @@ import { requireBudgetMember } from '../auth/middleware';
 import { loadActivePayeeRules } from '../budget/payee-rules';
 import { getOrCreatePayee } from '../budget/payees';
 import { getDb, type Db } from '../db/client';
-import { categories, payeeRules, transactions } from '../db/schema';
+import { budgets, categories, payeeRules, transactions } from '../db/schema';
 import { matchPayeeRule } from '../import/rules';
 import { parseAmountToMinor } from '../lib/money';
 import { ulid } from '../lib/ids';
@@ -41,6 +41,11 @@ const bandEndSchema = z
     return minor;
   });
 
+/** A step must be a positive size: a "multiple of 0" matches nothing sensible and a negative one is a typo. */
+const stepSchema = bandEndSchema.refine((v) => v === undefined || v === null || v > 0, {
+  message: 'a "multiple of" step must be greater than zero',
+});
+
 const ruleFields = z.object({
   matchText: z.string().trim().min(1).max(200),
   payeeName: z.string().trim().min(1).max(200),
@@ -49,6 +54,8 @@ const ruleFields = z.object({
   amountMin: bandEndSchema,
   /** Inclusive upper end of the price band, budget currency; null/omitted = none. */
   amountMax: bandEndSchema,
+  /** The price must be a whole multiple of this, budget currency (e.g. "20"); null/omitted = no such condition. */
+  amountMultiple: stepSchema,
 });
 
 const BAND_ORDER_ISSUE = {
@@ -78,6 +85,7 @@ function toRuleView(row: typeof payeeRules.$inferSelect) {
     categoryId: row.categoryId,
     amountMinMinor: row.amountMinMinor,
     amountMaxMinor: row.amountMaxMinor,
+    amountMultipleMinor: row.amountMultipleMinor,
   };
 }
 
@@ -116,6 +124,7 @@ payeeRulesRoute.post('/', async (c) => {
     categoryId: input.categoryId ?? null,
     amountMinMinor: input.amountMin ?? null,
     amountMaxMinor: input.amountMax ?? null,
+    amountMultipleMinor: input.amountMultiple ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -129,6 +138,7 @@ payeeRulesRoute.post('/', async (c) => {
         categoryId: input.categoryId ?? null,
         amountMinMinor: input.amountMin ?? null,
         amountMaxMinor: input.amountMax ?? null,
+        amountMultipleMinor: input.amountMultiple ?? null,
       },
     },
     201,
@@ -172,12 +182,14 @@ payeeRulesRoute.patch('/:ruleId', async (c) => {
     categoryId?: string | null;
     amountMinMinor?: number | null;
     amountMaxMinor?: number | null;
+    amountMultipleMinor?: number | null;
   } = { updatedAt: now };
   if (input.matchText !== undefined) patch.matchText = input.matchText;
   if (input.payeeName !== undefined) patch.payeeName = input.payeeName;
   if (input.categoryId !== undefined) patch.categoryId = input.categoryId;
   if (input.amountMin !== undefined) patch.amountMinMinor = input.amountMin;
   if (input.amountMax !== undefined) patch.amountMaxMinor = input.amountMax;
+  if (input.amountMultiple !== undefined) patch.amountMultipleMinor = input.amountMultiple;
   await db.update(payeeRules).set(patch).where(eq(payeeRules.id, ruleId));
 
   return c.json({ status: 'ok' });
@@ -213,11 +225,13 @@ payeeRulesRoute.post('/apply', async (c) => {
   const db = getDb(c.env);
 
   const rules = await loadActivePayeeRules(db, budgetId);
+  const [budget] = await db.select({ currencyCode: budgets.currencyCode }).from(budgets).where(eq(budgets.id, budgetId)).limit(1);
   const rows = await db
     .select({
       id: transactions.id,
       importPayeeRaw: transactions.importPayeeRaw,
       budgetAmountMinor: transactions.budgetAmountMinor,
+      currencyCode: transactions.currencyCode,
     })
     .from(transactions)
     .where(
@@ -235,7 +249,11 @@ payeeRulesRoute.post('/apply', async (c) => {
     if (!row.importPayeeRaw) continue;
     // The price band is judged on what the row is worth in the budget's
     // currency, which is exactly what budgetAmountMinor stores.
-    const match = matchPayeeRule(rules, row.importPayeeRaw, row.budgetAmountMinor);
+    // A row in a currency other than the budget's has only an ESTIMATED
+    // budget amount (see OVERSTATED_BY in src/import/rules.ts).
+    const match = matchPayeeRule(rules, row.importPayeeRaw, row.budgetAmountMinor, {
+      approximate: budget !== undefined && row.currencyCode !== budget.currencyCode,
+    });
     if (!match) continue;
 
     const payeeId = await getOrCreatePayee(db, budgetId, match.payeeName, now);

@@ -389,4 +389,6 @@ export interface PayeeRule {
   /** Inclusive price band in the budget's currency, minor units, as a magnitude; null = no limit on that side. */
   amountMinMinor: number | null;
   amountMaxMinor: number | null;
+  /** The price must be a whole multiple of this (same units); null = no such condition. */
+  amountMultipleMinor: number | null;
 }

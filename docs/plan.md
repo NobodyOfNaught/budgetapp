@@ -1197,6 +1197,36 @@ predate the exported range, so a correct opening balance is still required — t
 removes the phantom debits, it doesn't invent the history above them.
 
 
+### PR 35 — Payee rules can require a "multiple of", for flat-rate prices
+
+PR 34's price range could not express the owner's actual rule for the dance studio: flat-rate
+class nights are **$20, $40 and occasionally $60**, anything **over $100** is definitely an
+event, and any other number below $100 should be **left for the owner to confirm**. A range
+alone cannot say "a flat rate"; $45 and $40 are both under $50.
+
+Rules gain a third condition, `amount_multiple_minor` (migration 0014, nullable): the price
+must be a whole multiple of a step. The studio then takes three rules, and the most specific
+that fits wins — a multiple of 20 up to 60 goes to Hollywood; 100.01 and over goes to Events;
+and a plain "DANCE JAM" rule with **no category** sits behind them, so everything in between is
+named correctly but arrives uncategorised, which is what "confirm" means here. That reuses a
+behaviour that already existed: a rule with no category leaves the category alone.
+
+**The part that needed care is a charge made in another currency.** The $40 class night
+charged to the Canadian card arrives as CAD 57.45, which converts at the stored rate to
+**$41.94** — 4.8% over, and not a multiple of 20. The card adds an exchange spread and fee, so a
+converted amount is an *over*-estimate of the true price. Matching therefore asks whether some
+true price in the interval [amount / 1.07, amount x 1.02] satisfies the rule: generous in the
+direction the skew goes, nearly closed in the other. It has to be one-directional. The owner's
+CAD 79.54 event converts to $58.06, 3% *short* of the $60 class price; a symmetric allowance
+would have filed it under Hollywood. Two tests fail if the allowance is made symmetric. The
+allowance applies only to a row in a currency other than the budget's (an import compares the
+row's currency with the budget's; "apply to review queue" does the same from the stored row), so
+a $41 charge in the budget's own currency is exactly $41 and is left to confirm.
+
+Zero is never "a multiple of 20". Among matching rules the order is now: longer match text,
+then any price condition over none, then a multiple over a range alone, then the narrower
+range, then the oldest. A step of zero or less is rejected.
+
 ### PR 34 — Payee rules can be limited to a price range
 
 One merchant can mean different things at different prices. The owner's dance studio

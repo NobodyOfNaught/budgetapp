@@ -1,0 +1,15 @@
+-- Payee rule "multiple of" condition (PR 35) — one more nullable column on
+-- payee_rules, additive under the expand/contract rule. Nothing on `main`
+-- today reads or writes it, and NULL — every existing rule — means "no
+-- condition", which is how rules behave now.
+--
+-- A range (0013) cannot say "a flat rate". The owner's dance studio charges
+-- $20, $40 and occasionally $60 for a class night, and anything over $100 is
+-- an event; a charge of $45 or $80 is neither, and should be left for the
+-- owner to decide. "A multiple of $20" is the condition that separates the
+-- flat-rate class nights from a one-off event of arbitrary size.
+--
+-- Stored like the range ends: a positive step in the budget's currency, in
+-- minor units ($20 -> 2000). See src/import/rules.ts for how it is matched,
+-- including the allowance for charges made in a foreign currency.
+ALTER TABLE payee_rules ADD COLUMN amount_multiple_minor INTEGER;

@@ -6,9 +6,17 @@ function rule(
   matchText: string,
   payeeName: string,
   categoryId: string | null = null,
-  band: { min?: number; max?: number } = {},
+  band: { min?: number; max?: number; multiple?: number } = {},
 ): PayeeRule {
-  return { id, matchText, payeeName, categoryId, amountMinMinor: band.min ?? null, amountMaxMinor: band.max ?? null };
+  return {
+    id,
+    matchText,
+    payeeName,
+    categoryId,
+    amountMinMinor: band.min ?? null,
+    amountMaxMinor: band.max ?? null,
+    amountMultipleMinor: band.multiple ?? null,
+  };
 }
 
 describe('matchPayeeRule', () => {
@@ -108,5 +116,76 @@ describe('matchPayeeRule — price bands', () => {
     const plain = [rule('r1', 'GIANT FOOD', 'A'), rule('r2', 'GIANT FOOD INC', 'B')];
     expect(matchPayeeRule(plain, 'GIANT FOOD INC #152', 12345)?.id).toBe('r2');
     expect(matchPayeeRule(plain, 'GIANT FOOD INC #152')?.id).toBe('r2');
+  });
+});
+
+describe('matchPayeeRule — "a multiple of", for flat-rate prices', () => {
+  // The owner's rule for the dance studio, as three rules:
+  //   flat-rate class nights: a multiple of $20, up to $60   -> Hollywood
+  //   anything over $100 is definitely an event               -> Events
+  //   everything else in between: named, but NO category, so it is left to confirm.
+  const raw = 'DANCE JAM PRODUCTIONS 17801 Bowie Mill Rd    DERWOOD      MD';
+  const hollywood = rule('hollywood', 'DANCE JAM', 'Dance Jam', 'hollywood', { multiple: 2000, max: 6000 });
+  const events = rule('events', 'DANCE JAM', 'Dance Jam', 'events', { min: 10001 });
+  const confirm = rule('confirm', 'DANCE JAM', 'Dance Jam', null);
+  const rules = [confirm, hollywood, events]; // deliberately not in specificity order
+  const pick = (cents: number, approximate = false) => matchPayeeRule(rules, raw, cents, { approximate })?.id;
+
+  it('sends $20, $40 and $60 to Hollywood', () => {
+    for (const cents of [2000, 4000, 6000]) expect(pick(cents)).toBe('hollywood');
+  });
+
+  it('sends anything over $100 to Events', () => {
+    for (const cents of [10001, 11509, 25000]) expect(pick(cents)).toBe('events');
+  });
+
+  it('leaves every other number below $100 for the owner to confirm — named, but with no category', () => {
+    // $30 and $45 are not multiples of 20; $80 and $100 are, but sit above
+    // the "occasionally 60" ceiling, and $100 is not OVER 100.
+    for (const cents of [3000, 4500, 5000, 8000, 9999, 10000]) {
+      const match = matchPayeeRule(rules, raw, cents);
+      expect(match?.id, `${cents / 100}`).toBe('confirm');
+      expect(match?.categoryId).toBeNull();
+    }
+  });
+
+  it('never treats zero as "a multiple of 20"', () => {
+    expect(matchPayeeRule([hollywood], raw, 0)).toBeNull();
+  });
+
+  it('is exact for a charge in the budget currency — $41 is not "about $40"', () => {
+    expect(pick(4100)).toBe('confirm');
+    expect(pick(3999)).toBe('confirm');
+  });
+
+  describe('a charge made in another currency (converted, so only an estimate)', () => {
+    // Real Neo (CAD) statement lines at the stored rate of 0.73, in USD cents.
+    it('still reads the $40 class night as $40: CAD 57.45 converts to $41.94', () => {
+      expect(pick(4194, true)).toBe('hollywood');
+      expect(pick(4181, true)).toBe('hollywood'); // CAD 57.27
+      expect(pick(4177, true)).toBe('hollywood'); // CAD 57.22
+      expect(pick(4173, true)).toBe('hollywood'); // CAD 57.16
+    });
+
+    it('does NOT read the CAD 79.54 event charge ($58.06) as the $60 class price 3% above it', () => {
+      // The skew only ever inflates a converted amount, so a figure BELOW
+      // a multiple is not evidence of that multiple. A symmetric tolerance
+      // would have filed this under Hollywood.
+      expect(pick(5806, true)).toBe('confirm');
+    });
+
+    it('reads a converted $60 class (CAD ~86) as $60, but not an exact-currency 62.80 as $60', () => {
+      expect(pick(6280, true)).toBe('hollywood');
+      expect(pick(6280, false)).toBe('confirm');
+    });
+
+    it('does not stretch "over $100" downwards: a converted $85.56 is still for confirmation', () => {
+      expect(pick(8556, true)).toBe('confirm');
+    });
+  });
+
+  it('prefers a rule with a multiple over a plain range at the same text length', () => {
+    const range = rule('range', 'DANCE JAM', 'Dance Jam', 'other', { max: 6000 });
+    expect(matchPayeeRule([range, hollywood], raw, 4000)?.id).toBe('hollywood');
   });
 });
